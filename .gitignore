@@ -1,0 +1,22 @@
+# Maven build output
+backend/target/
+
+# Node.js dependencies and Next.js build output
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Python
+pageindex/__pycache__/
+pageindex/*.pyc
+pageindex/*.pyo
+
+# Environment files
+.env
+.env.local
+.env.production
+
+# IDE
+.idea/
+*.iml
+.vscode/
