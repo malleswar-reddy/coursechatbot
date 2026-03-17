@@ -18,11 +18,14 @@ public class OllamaConfig {
     @Value("${ollama.base-url:http://localhost:11434}")
     private String ollamaBaseUrl;
 
-    @Value("${ollama.model:qwen2.5:7b}")
+    @Value("${ollama.model:qwen2.5:0.5b}")
     private String ollamaModel;
 
-    @Value("${ollama.timeout-seconds:120}")
+    @Value("${ollama.timeout-seconds:600}")
     private int timeoutSeconds;
+
+    @Value("${ollama.num-predict:250}")
+    private int numPredict;
 
     @Bean
     public ChatLanguageModel chatLanguageModel() {
@@ -30,7 +33,8 @@ public class OllamaConfig {
                 .baseUrl(ollamaBaseUrl)
                 .modelName(ollamaModel)
                 .timeout(Duration.ofSeconds(timeoutSeconds))
-                .temperature(0.2)
+                .temperature(0.1)
+                .numPredict(numPredict)
                 .build();
     }
 }

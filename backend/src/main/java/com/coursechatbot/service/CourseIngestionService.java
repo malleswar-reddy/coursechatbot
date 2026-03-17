@@ -11,6 +11,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -28,6 +29,12 @@ public class CourseIngestionService {
     private final CourseContentRepository contentRepository;
     private final CourseIndexRepository indexRepository;
     private final ObjectMapper objectMapper;
+
+    public List<String> getAllCourseIds() {
+        return indexRepository.findAll().stream()
+                .map(CourseIndex::getCourseId)
+                .toList();
+    }
 
     @Transactional
     public int ingest(String courseId, String indexJson) {

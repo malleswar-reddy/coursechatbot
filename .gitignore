@@ -20,3 +20,4 @@ pageindex/*.pyo
 .idea/
 *.iml
 .vscode/
+.github/

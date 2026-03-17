@@ -20,6 +20,22 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'
 
 export default function ChatWindow() {
   const [courseId, setCourseId] = useState('course1')
+  const [courseIds, setCourseIds] = useState<string[]>([])
+      // Fetch course IDs on mount
+      useEffect(() => {
+        async function fetchCourseIds() {
+          try {
+            const res = await fetch(`${API_URL}/api/courses/courseIds`)
+            if (!res.ok) throw new Error('Failed to fetch course IDs')
+            const ids: string[] = await res.json()
+            setCourseIds(ids)
+            if (ids.length > 0) setCourseId(ids[0])
+          } catch (e) {
+            // Optionally handle error
+          }
+        }
+        fetchCourseIds()
+      }, [])
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -81,12 +97,19 @@ export default function ChatWindow() {
       {/* Course selector */}
       <div style={styles.courseBar}>
         <label style={{ fontWeight: 600, marginRight: 8 }}>Course ID:</label>
-        <input
+        <select
           value={courseId}
           onChange={e => setCourseId(e.target.value)}
           style={styles.courseInput}
-          placeholder="e.g. course1"
-        />
+        >
+          {courseIds.length === 0 ? (
+            <option value="">Loading...</option>
+          ) : (
+            courseIds.map(id => (
+              <option key={id} value={id}>{id}</option>
+            ))
+          )}
+        </select>
       </div>
 
       {/* Messages */}

@@ -1,0 +1,126 @@
+// =============================================================================
+// Jenkinsfile.deploy — Quick Re-Deploy (no rebuild)
+// Use this job to restart / redeploy services on the server WITHOUT rebuilding
+// Docker images (much faster than the full Jenkinsfile CI/CD pipeline).
+//
+// Use the main Jenkinsfile when you want to push new code + rebuild images.
+// =============================================================================
+
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'SERVER_HOST',
+            defaultValue: '100.114.88.111',
+            description: '🌐  Target server IP'
+        )
+        string(
+            name: 'SERVER_DIR',
+            defaultValue: '/home/dell/chatbot',
+            description: '📁  Project directory on server'
+        )
+        choice(
+            name: 'SERVICE',
+            choices: ['all', 'backend', 'frontend', 'postgres', 'ollama', 'open-webui'],
+            description: '🔄  Which service(s) to restart'
+        )
+        booleanParam(
+            name: 'PULL_LATEST_CODE',
+            defaultValue: false,
+            description: '📥  git pull latest code on server before restarting'
+        )
+    }
+
+    environment {
+        SERVER_USER  = 'dell'
+        SSH_CRED_ID  = 'server-ssh-key'
+        COMPOSE_FILE = 'docker-compose.server.yml'
+        SSH_OPTS     = '-o StrictHostKeyChecking=no -o ConnectTimeout=30'
+    }
+
+    stages {
+
+        // ── Stage 1: (Optional) Pull latest code on server ────────────────────
+        stage('Git Pull on Server') {
+            when { expression { params.PULL_LATEST_CODE == true } }
+            steps {
+                sshagent(credentials: [env.SSH_CRED_ID]) {
+                    sh """
+                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
+                            "cd ${params.SERVER_DIR} && git pull origin main"
+                    """
+                }
+            }
+        }
+
+        // ── Stage 2: Restart service(s) ──────────────────────────────────────
+        stage('Restart Services') {
+            steps {
+                sshagent(credentials: [env.SSH_CRED_ID]) {
+                    script {
+                        def svc = params.SERVICE == 'all' ? '' : params.SERVICE
+                        sh """
+                            echo "🔄 Restarting: ${params.SERVICE == 'all' ? 'ALL services' : params.SERVICE}"
+                            ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
+                                "cd ${params.SERVER_DIR} && \\
+                                 docker compose -f ${COMPOSE_FILE} up -d --no-build --remove-orphans ${svc}"
+                        """
+                    }
+                }
+            }
+        }
+
+        // ── Stage 3: Show status on server ───────────────────────────────────
+        stage('Status') {
+            steps {
+                sshagent(credentials: [env.SSH_CRED_ID]) {
+                    sh """
+                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
+                            "cd ${params.SERVER_DIR} && docker compose -f ${COMPOSE_FILE} ps"
+                    """
+                }
+            }
+        }
+
+        // ── Stage 4: Smoke test ───────────────────────────────────────────────
+        stage('Smoke Test') {
+            when { expression { params.SERVICE == 'all' || params.SERVICE == 'backend' } }
+            steps {
+                sh """
+                    sleep 15
+                    echo "--- Backend API ---"
+                    curl -sf --max-time 10 http://${params.SERVER_HOST}:8080/api/courses/courseIds \\
+                        && echo "✅ Backend OK" \\
+                        || echo "⚠️  Backend not responding yet"
+
+                    echo "--- Frontend ---"
+                    curl -sf --max-time 10 http://${params.SERVER_HOST}:3000/ -o /dev/null -w "HTTP %{http_code}\\n" \\
+                        && echo "✅ Frontend OK" \\
+                        || echo "⚠️  Frontend not responding yet"
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo """
+            ✅ Restart complete
+            Backend   : http://${params.SERVER_HOST}:8080
+            Frontend  : http://${params.SERVER_HOST}:3000
+            Open WebUI: http://${params.SERVER_HOST}:3001
+            """
+        }
+        failure {
+            echo "❌ Deploy failed — check logs below"
+            sshagent(credentials: [env.SSH_CRED_ID]) {
+                sh """
+                    ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
+                        'docker logs coursechatbot-backend --tail 50 2>/dev/null || true
+                         docker logs coursechatbot-postgres --tail 30 2>/dev/null || true' || true
+                """
+            }
+        }
+    }
+}
