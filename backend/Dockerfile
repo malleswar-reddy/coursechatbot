@@ -25,7 +25,7 @@ FROM amazoncorretto:17-alpine AS jre-builder
 # binutils supplies the `objcopy` binary that jlink needs for --strip-debug
 RUN apk add --no-cache binutils && \
     $JAVA_HOME/bin/jlink \
-      --add-modules java.base,java.logging,java.xml,java.naming,java.desktop,java.management,java.security.jgss,java.instrument,java.sql,java.transaction.xa,jdk.unsupported,jdk.crypto.ec \
+      --add-modules java.base,java.logging,java.xml,java.naming,java.desktop,java.management,java.security.jgss,java.instrument,java.sql,java.transaction.xa,jdk.unsupported,jdk.crypto.ec,java.compiler \
       --strip-debug \
       --no-man-pages \
       --no-header-files \
