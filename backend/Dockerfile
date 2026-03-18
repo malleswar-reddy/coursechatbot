@@ -58,4 +58,9 @@ EXPOSE 8080
 ENTRYPOINT ["java", \
   "-XX:+UseContainerSupport", \
   "-XX:MaxRAMPercentage=75.0", \
+  "-XX:+UseG1GC", \
+  "-XX:+TieredCompilation", \
+  "-XX:TieredStopAtLevel=1", \
+  "-Dspring.main.lazy-initialization=true", \
+  "-Djava.security.egd=file:/dev/./urandom", \
   "org.springframework.boot.loader.launch.JarLauncher"]
