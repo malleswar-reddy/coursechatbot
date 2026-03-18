@@ -2,49 +2,26 @@
 // Jenkinsfile.migrate — Flyway Database Migration Job
 // =============================================================================
 //
-//  WHAT IS FLYWAY?
-//  ───────────────
-//  Flyway is a DB version-control tool. It tracks which SQL migration scripts
-//  have been applied and runs any new ones automatically.
+//  TWO MODES — choose with DEPLOY_MODE parameter:
 //
-//  Migration files live in:
-//    backend/src/main/resources/db/migration/
+//  LOCAL  (default — no SSH keys needed)
+//  ──────
+//  Jenkins AND PostgreSQL run on the SAME server.
+//  Flyway docker runs directly — no SSH, no rsync needed.
+//  ✅ Use this now.
 //
-//  Naming convention (MUST follow exactly):
-//    V{version}__{description}.sql
-//    │           ││
-//    │           │└─ description (underscores = spaces)
-//    │           └── double underscore (mandatory)
-//    └─────────────── version number (1, 2, 3 … or 1.1, 1.2 …)
-//
-//  Examples:
-//    V1__init_schema.sql          ← already applied ✅
-//    V2__add_course_title.sql     ← next migration
-//    V3__add_embedding_column.sql ← after that
-//
-//  HOW THIS JOB WORKS
-//  ──────────────────
-//  1. Jenkins rsync migration SQL files from workspace → server
-//  2. Jenkins SSH into server
-//  3. Runs `docker run flyway/flyway` container with:
-//       --network host           → connects to postgres on localhost:5432
-//       -v /migration/dir:/flyway/sql  → mounts SQL files into container
-//  4. Flyway reads flyway_schema_history table to see what's applied,
-//     then runs any new V*.sql files in order.
+//  REMOTE  (SSH to separate server — set up later)
+//  ──────
+//  Jenkins is on a different machine. Uses SSH + rsync.
+//  Requires Jenkins credential ID: server-ssh-key
 //
 //  COMMANDS
 //  ────────
-//    migrate  → apply all pending migrations         (most common)
-//    info     → show which migrations are applied    (safe, read-only)
-//    validate → check migrations match what's in DB  (safe, read-only)
-//    repair   → fix failed migration checksums       (use if migration broke)
-//    baseline → mark current DB state as V1          (first-time existing DB)
-//
-//  PREREQUISITES
-//  ─────────────
-//  Jenkins Plugins : SSH Agent Plugin
-//  Jenkins Cred ID : server-ssh-key  (SSH Username with private key, user=dell)
-//  Server          : Docker installed, postgres container running
+//    info     → show which migrations are applied / pending  (safe, read-only)
+//    migrate  → apply all pending V*.sql files
+//    validate → check SQL files haven't changed after applying
+//    repair   → fix failed migration checksums
+//    baseline → mark existing DB as V1  (first-time only)
 // =============================================================================
 
 pipeline {
@@ -52,32 +29,40 @@ pipeline {
 
     parameters {
         choice(
+            name: 'DEPLOY_MODE',
+            choices: ['local', 'remote'],
+            description: '''Deploy mode:
+  local  = Jenkins runs ON the same server as Docker (no SSH needed) ✅
+  remote = Jenkins SSHes to a separate server (needs server-ssh-key credential)'''
+        )
+
+        choice(
             name: 'FLYWAY_COMMAND',
             choices: ['info', 'migrate', 'validate', 'repair', 'baseline'],
-            description: '''Flyway command to run:
-  info     → show migration status (safe, run first to check)
+            description: '''Flyway command:
+  info     → show migration status (safe, run first)
   migrate  → apply all pending SQL migrations
   validate → verify applied migrations match SQL files
   repair   → fix checksum mismatches in flyway_schema_history
-  baseline → mark existing DB as V1 (only for brand-new DB with existing schema)'''
+  baseline → mark existing DB as V1 (first-time only)'''
         )
 
         string(
             name: 'SERVER_HOST',
             defaultValue: '100.114.88.111',
-            description: '🌐  Server IP where PostgreSQL is running'
+            description: '🌐  Server IP (used for REMOTE mode SSH + smoke test URLs)'
         )
 
         string(
             name: 'SERVER_DIR',
             defaultValue: '/home/dell/chatbot',
-            description: '📁  Project directory on server'
+            description: '📁  Project dir on server (REMOTE mode only)'
         )
 
         string(
             name: 'DB_HOST',
             defaultValue: 'localhost',
-            description: '🗄️  DB host as seen FROM the server (localhost = postgres docker port 5432 mapped to host)'
+            description: '🗄️  DB host as seen from the server (localhost = postgres mapped to host :5432)'
         )
 
         string(
@@ -98,17 +83,22 @@ pipeline {
             description: 'DB username'
         )
 
-        // Use Jenkins credentials for password in production instead of plain text
         string(
             name: 'DB_PASSWORD',
             defaultValue: 'chatbot_secret',
-            description: '🔑  DB password (use Jenkins credential binding in production)'
+            description: '🔑  DB password'
+        )
+
+        string(
+            name: 'OLLAMA_MODEL',
+            defaultValue: 'qwen2.5:0.5b',
+            description: '🤖  Ollama model (recorded in build info — used when restarting backend after migration)'
         )
 
         string(
             name: 'FLYWAY_VERSION',
             defaultValue: '9-alpine',
-            description: 'Flyway Docker image tag (9-alpine = Flyway 9.x, lightweight)'
+            description: 'Flyway Docker image tag'
         )
     }
 
@@ -116,8 +106,9 @@ pipeline {
         SERVER_USER   = 'dell'
         SSH_CRED_ID   = 'server-ssh-key'
         SSH_OPTS      = '-o StrictHostKeyChecking=no -o ConnectTimeout=30'
-        // Migration SQL files location ON the server (after rsync)
-        MIGRATION_DIR = "${params.SERVER_DIR}/backend/src/main/resources/db/migration"
+        // In LOCAL mode migration dir = Jenkins workspace path
+        // In REMOTE mode = path on remote server
+        MIGRATION_DIR = "${params.DEPLOY_MODE == 'local' ? env.WORKSPACE : params.SERVER_DIR}/backend/src/main/resources/db/migration"
     }
 
     stages {
@@ -127,164 +118,216 @@ pipeline {
             steps {
                 checkout scm
                 echo "✅ Source ready at ${WORKSPACE}"
+                echo "🚀 Deploy mode  : ${params.DEPLOY_MODE}"
+                echo "🗄️  Flyway cmd   : ${params.FLYWAY_COMMAND}"
+                echo "🤖 Ollama model : ${params.OLLAMA_MODEL}"
+                echo "📁 Migration dir: ${env.MIGRATION_DIR}"
             }
         }
 
-        // ── Stage 2: Sync migration SQL files to server ───────────────────────
-        //
-        //  Copies backend/src/main/resources/db/migration/*.sql to the server.
-        //  Any new V*.sql files you added locally will be sent here.
-        // ─────────────────────────────────────────────────────────────────────
+        // ── Stage 2: Sync migration files (REMOTE mode only) ──────────────────
+        // LOCAL mode: files already in Jenkins workspace → skip
         stage('Sync Migration Files') {
+            when { expression { params.DEPLOY_MODE == 'remote' } }
             steps {
                 sshagent(credentials: [env.SSH_CRED_ID]) {
                     sh """
                         echo "📤 Syncing migration SQL files to server..."
-
-                        # Create migration dir on server if missing
                         ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \
-                            "mkdir -p ${MIGRATION_DIR}"
-
-                        # Rsync only the SQL migration files
+                            "mkdir -p ${env.MIGRATION_DIR}"
                         rsync -avz \
                             -e "ssh ${SSH_OPTS}" \
                             "${WORKSPACE}/backend/src/main/resources/db/migration/" \
-                            "${SERVER_USER}@${params.SERVER_HOST}:${MIGRATION_DIR}/"
-
-                        echo "✅ Migration files synced:"
-                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \
-                            "ls -lh ${MIGRATION_DIR}/"
+                            "${SERVER_USER}@${params.SERVER_HOST}:${env.MIGRATION_DIR}/"
+                        echo "✅ Migration files synced."
                     """
                 }
             }
         }
 
-        // ── Stage 3: Check postgres is running on server ──────────────────────
+        // ── Stage 3: Verify PostgreSQL is running ─────────────────────────────
         stage('Verify Postgres') {
             steps {
-                sshagent(credentials: [env.SSH_CRED_ID]) {
-                    sh """
-                        echo "🗄️  Checking PostgreSQL is running on server..."
-                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \
-                            "docker inspect --format='Status: {{.State.Status}}  Health: {{.State.Health.Status}}' coursechatbot-postgres 2>/dev/null || echo 'WARNING: postgres container not found'"
-
-                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \
-                            "docker exec coursechatbot-postgres pg_isready -U chatbot -d coursechatbot \
-                             && echo '✅ PostgreSQL accepting connections' \
-                             || { echo '❌ PostgreSQL not ready — start it first with: docker compose -f docker-compose.server.yml up -d postgres'; exit 1; }"
-                    """
+                script {
+                    if (params.DEPLOY_MODE == 'local') {
+                        sh """
+                            echo "🗄️  Checking PostgreSQL locally..."
+                            docker inspect --format='Status: {{.State.Status}}  Health: {{.State.Health.Status}}' \
+                                coursechatbot-postgres 2>/dev/null \
+                                || echo 'WARNING: coursechatbot-postgres container not found'
+                            docker exec coursechatbot-postgres \
+                                pg_isready -U chatbot -d coursechatbot \
+                                && echo '✅ PostgreSQL is ready' \
+                                || { echo '❌ PostgreSQL not ready — start it first:'; \
+                                     echo '   docker compose -f docker-compose.server.yml up -d postgres'; \
+                                     exit 1; }
+                        """
+                    } else {
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \
+                                    "docker inspect --format='Status: {{.State.Status}}  Health: {{.State.Health.Status}}' coursechatbot-postgres 2>/dev/null || true"
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \
+                                    "docker exec coursechatbot-postgres pg_isready -U chatbot -d coursechatbot \
+                                     && echo '✅ PostgreSQL is ready' \
+                                     || { echo '❌ PostgreSQL not ready'; exit 1; }"
+                            """
+                        }
+                    }
                 }
             }
         }
 
-        // ── Stage 4: Show current migration status (always runs first) ─────────
-        //
-        //  Runs `flyway info` to show which migrations are applied / pending.
-        //  This runs BEFORE the actual command so you can see the before state.
-        // ─────────────────────────────────────────────────────────────────────
+        // ── Stage 4: Migration Status (Before) ────────────────────────────────
         stage('Migration Status (Before)') {
             steps {
-                sshagent(credentials: [env.SSH_CRED_ID]) {
-                    sh """
-                        echo "📋 Current Flyway migration status on server:"
-                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash << 'REMOTE'
-                            docker run --rm \
-                                --network host \
-                                -v "${MIGRATION_DIR}:/flyway/sql" \
+                script {
+                    def mdir = env.MIGRATION_DIR
+                    def flywayArgs = """-url="jdbc:postgresql://${params.DB_HOST}:${params.DB_PORT}/${params.DB_NAME}" \
+                                    -user="${params.DB_USER}" \
+                                    -password="${params.DB_PASSWORD}" \
+                                    -locations="filesystem:/flyway/sql" """
+
+                    if (params.DEPLOY_MODE == 'local') {
+                        sh """
+                            echo "📋 Flyway status BEFORE:"
+                            docker run --rm --network host \
+                                -v "${mdir}:/flyway/sql" \
                                 flyway/flyway:${params.FLYWAY_VERSION} \
-                                -url="jdbc:postgresql://${params.DB_HOST}:${params.DB_PORT}/${params.DB_NAME}" \
-                                -user="${params.DB_USER}" \
-                                -password="${params.DB_PASSWORD}" \
-                                -locations="filesystem:/flyway/sql" \
-                                info
+                                ${flywayArgs} \
+                                info || true
+                        """
+                    } else {
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash -s << 'REMOTE'
+                                    flyway_run() {
+                                        docker run --rm --network host \
+                                            -v "${mdir}:/flyway/sql" \
+                                            flyway/flyway:${params.FLYWAY_VERSION} \
+                                            -url="jdbc:postgresql://${params.DB_HOST}:${params.DB_PORT}/${params.DB_NAME}" \
+                                            -user="${params.DB_USER}" \
+                                            -password="${params.DB_PASSWORD}" \
+                                            -locations="filesystem:/flyway/sql" "\$1"
+                                    }
+                                    flyway_run info
 REMOTE
-                    """
+                            """
+                        }
+                    }
                 }
             }
         }
 
-        // ── Stage 5: Run the requested Flyway command ─────────────────────────
-        //
-        //  migrate  → Runs all V*.sql files that haven't been applied yet.
-        //             Flyway reads flyway_schema_history to know what's done.
-        //             Each migration runs in a transaction — if it fails,
-        //             the transaction rolls back and Flyway marks it FAILED.
-        //
-        //  validate → Checks that the checksum of applied migrations matches
-        //             the SQL files on disk (catches accidental edits).
-        //
-        //  repair   → Fixes FAILED migrations in flyway_schema_history.
-        //             Use after fixing a broken SQL file.
-        //
-        //  baseline → Inserts a baseline entry in flyway_schema_history
-        //             marking the current DB as V1 (first-time setup).
-        // ─────────────────────────────────────────────────────────────────────
+        // ── Stage 5: Run Flyway Command ────────────────────────────────────────
         stage('Run Flyway') {
-            when {
-                // Only run the actual command if it's not 'info'
-                // (info already ran in "Migration Status" stage above)
-                expression { params.FLYWAY_COMMAND != 'info' }
-            }
+            when { expression { params.FLYWAY_COMMAND != 'info' } }
             steps {
-                sshagent(credentials: [env.SSH_CRED_ID]) {
-                    sh """
-                        echo "🚀 Running: flyway ${params.FLYWAY_COMMAND}"
-                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash << 'REMOTE'
-                            docker run --rm \
-                                --network host \
-                                -v "${MIGRATION_DIR}:/flyway/sql" \
+                script {
+                    def mdir = env.MIGRATION_DIR
+                    def cmd  = params.FLYWAY_COMMAND
+
+                    if (params.DEPLOY_MODE == 'local') {
+                        sh """
+                            echo "🚀 Running: flyway ${cmd}"
+                            docker run --rm --network host \
+                                -v "${mdir}:/flyway/sql" \
                                 flyway/flyway:${params.FLYWAY_VERSION} \
                                 -url="jdbc:postgresql://${params.DB_HOST}:${params.DB_PORT}/${params.DB_NAME}" \
                                 -user="${params.DB_USER}" \
                                 -password="${params.DB_PASSWORD}" \
                                 -locations="filesystem:/flyway/sql" \
                                 -outOfOrder=false \
-                                ${params.FLYWAY_COMMAND}
+                                ${cmd}
+                            echo "✅ flyway ${cmd} complete."
+                        """
+                    } else {
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash -s << 'REMOTE'
+                                    flyway_run() {
+                                        docker run --rm --network host \
+                                            -v "${mdir}:/flyway/sql" \
+                                            flyway/flyway:${params.FLYWAY_VERSION} \
+                                            -url="jdbc:postgresql://${params.DB_HOST}:${params.DB_PORT}/${params.DB_NAME}" \
+                                            -user="${params.DB_USER}" \
+                                            -password="${params.DB_PASSWORD}" \
+                                            -locations="filesystem:/flyway/sql" \
+                                            -outOfOrder=false "\$1"
+                                    }
+                                    flyway_run ${cmd}
 REMOTE
-                        echo "✅ Flyway ${params.FLYWAY_COMMAND} complete."
-                    """
+                                echo "✅ flyway ${cmd} complete."
+                            """
+                        }
+                    }
                 }
             }
         }
 
-        // ── Stage 6: Show migration status AFTER ─────────────────────────────
+        // ── Stage 6: Migration Status (After) ─────────────────────────────────
         stage('Migration Status (After)') {
-            when {
-                expression { params.FLYWAY_COMMAND != 'info' }
-            }
+            when { expression { params.FLYWAY_COMMAND != 'info' } }
             steps {
-                sshagent(credentials: [env.SSH_CRED_ID]) {
-                    sh """
-                        echo "📋 Flyway status after ${params.FLYWAY_COMMAND}:"
-                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash << 'REMOTE'
-                            docker run --rm \
-                                --network host \
-                                -v "${MIGRATION_DIR}:/flyway/sql" \
+                script {
+                    def mdir = env.MIGRATION_DIR
+
+                    if (params.DEPLOY_MODE == 'local') {
+                        sh """
+                            echo "📋 Flyway status AFTER:"
+                            docker run --rm --network host \
+                                -v "${mdir}:/flyway/sql" \
                                 flyway/flyway:${params.FLYWAY_VERSION} \
                                 -url="jdbc:postgresql://${params.DB_HOST}:${params.DB_PORT}/${params.DB_NAME}" \
                                 -user="${params.DB_USER}" \
                                 -password="${params.DB_PASSWORD}" \
                                 -locations="filesystem:/flyway/sql" \
                                 info
+                        """
+                    } else {
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash -s << 'REMOTE'
+                                    flyway_run() {
+                                        docker run --rm --network host \
+                                            -v "${mdir}:/flyway/sql" \
+                                            flyway/flyway:${params.FLYWAY_VERSION} \
+                                            -url="jdbc:postgresql://${params.DB_HOST}:${params.DB_PORT}/${params.DB_NAME}" \
+                                            -user="${params.DB_USER}" \
+                                            -password="${params.DB_PASSWORD}" \
+                                            -locations="filesystem:/flyway/sql" "\$1"
+                                    }
+                                    flyway_run info
 REMOTE
-                    """
+                            """
+                        }
+                    }
                 }
             }
         }
 
-        // ── Stage 7: Verify DB tables exist ──────────────────────────────────
+        // ── Stage 7: Verify Tables ─────────────────────────────────────────────
         stage('Verify Tables') {
             steps {
-                sshagent(credentials: [env.SSH_CRED_ID]) {
-                    sh """
-                        echo "🔍 Verifying expected tables exist in DB..."
-                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \
-                            "docker exec coursechatbot-postgres \
-                                psql -U chatbot -d coursechatbot -c '\\dt' \
-                             && docker exec coursechatbot-postgres \
-                                psql -U chatbot -d coursechatbot \
-                                -c 'SELECT version, description, installed_on, success FROM flyway_schema_history ORDER BY installed_rank;'"
-                    """
+                script {
+                    def psqlCmd = """docker exec coursechatbot-postgres \
+                        psql -U chatbot -d coursechatbot -c '\\dt' && \
+                        docker exec coursechatbot-postgres \
+                        psql -U chatbot -d coursechatbot \
+                        -c 'SELECT version, description, installed_on, success FROM flyway_schema_history ORDER BY installed_rank;'"""
+
+                    if (params.DEPLOY_MODE == 'local') {
+                        sh """
+                            echo "🔍 Verifying tables locally..."
+                            ${psqlCmd}
+                        """
+                    } else {
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} "${psqlCmd}"
+                            """
+                        }
+                    }
                 }
             }
         }
@@ -294,26 +337,28 @@ REMOTE
         success {
             echo """
             ============================================================
-            ✅  FLYWAY ${params.FLYWAY_COMMAND.toUpperCase()} SUCCESSFUL
+            ✅  FLYWAY ${params.FLYWAY_COMMAND.toUpperCase()} SUCCESSFUL  [${params.DEPLOY_MODE} mode]
 
-            Server : ${params.SERVER_HOST}
-            DB     : ${params.DB_NAME} @ ${params.DB_HOST}:${params.DB_PORT}
-            User   : ${params.DB_USER}
-            Files  : ${MIGRATION_DIR}
+            Server       : ${params.SERVER_HOST}
+            DB           : ${params.DB_NAME} @ ${params.DB_HOST}:${params.DB_PORT}
+            Ollama model : ${params.OLLAMA_MODEL}
+            Migration dir: ${env.MIGRATION_DIR}
             ============================================================
             """
         }
         failure {
             echo """
-            ❌ FLYWAY ${params.FLYWAY_COMMAND.toUpperCase()} FAILED
+            ❌ FLYWAY ${params.FLYWAY_COMMAND.toUpperCase()} FAILED  [${params.DEPLOY_MODE} mode]
 
             Common fixes:
-            1. If 'migrate' failed mid-way → fix the SQL, then run 'repair' first, then 'migrate' again
-            2. If checksum mismatch       → NEVER edit applied V*.sql files; add a new V{n+1}__.sql instead
-            3. If postgres not running    → run Jenkinsfile.deploy first to start postgres
-            4. If first-time existing DB  → run 'baseline' command first, then 'migrate'
+            1. migrate failed mid-way  → fix SQL, run 'repair', then 'migrate' again
+            2. Checksum mismatch       → NEVER edit applied V*.sql; add new V{n+1}__.sql
+            3. Postgres not running    → docker compose -f docker-compose.server.yml up -d postgres
+            4. First-time existing DB  → run 'baseline' first, then 'migrate'
             """
+        }
+        always {
+            echo "Build #${env.BUILD_NUMBER} — ${currentBuild.currentResult} — ${params.FLYWAY_COMMAND} [${params.DEPLOY_MODE}]"
         }
     }
 }
-

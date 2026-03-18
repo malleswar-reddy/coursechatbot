@@ -149,41 +149,58 @@ pipeline {
             steps {
                 script {
                     def migrationDir = "${env.DEPLOY_DIR}/backend/src/main/resources/db/migration"
-                    def flywaycmd = """
-                        docker run --rm \\
-                            --network host \\
-                            -v "${migrationDir}:/flyway/sql" \\
-                            flyway/flyway:9-alpine \\
-                            -url="jdbc:postgresql://localhost:5432/coursechatbot" \\
-                            -user="chatbot" \\
-                            -password="chatbot_secret" \\
-                            -locations="filesystem:/flyway/sql"
-                    """
 
                     if (params.DEPLOY_MODE == 'local') {
+                        // Define a shell function so the subcommand (info/migrate)
+                        // is always passed as an argument — NOT appended after a newline.
                         sh """
-                            echo "🗄️  Running Flyway on local Docker..."
-                            echo "--- status before ---"
-                            ${flywaycmd} info  || true
-                            echo "--- migrate ---"
-                            ${flywaycmd} migrate
+                            set -e
+                            MIGRATION_DIR="${migrationDir}"
+
+                            flyway_run() {
+                                docker run --rm --network host \\
+                                    -v "\${MIGRATION_DIR}:/flyway/sql" \\
+                                    flyway/flyway:9-alpine \\
+                                    -url="jdbc:postgresql://localhost:5432/coursechatbot" \\
+                                    -user="chatbot" \\
+                                    -password="chatbot_secret" \\
+                                    -locations="filesystem:/flyway/sql" \\
+                                    "\$1"
+                            }
+
+                            echo "🗄️  Flyway status (before)..."
+                            flyway_run info || true
+
+                            echo "🗄️  Running Flyway migrate..."
+                            flyway_run migrate
+
                             echo "✅ Flyway complete."
                         """
                     } else {
                         sshagent(credentials: [env.SSH_CRED_ID]) {
                             sh """
-                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash << 'REMOTE'
-                                    MDIR="${params.SERVER_DIR}/backend/src/main/resources/db/migration"
-                                    docker run --rm --network host -v "\${MDIR}:/flyway/sql" \\
-                                        flyway/flyway:9-alpine \\
-                                        -url="jdbc:postgresql://localhost:5432/coursechatbot" \\
-                                        -user="chatbot" -password="chatbot_secret" \\
-                                        -locations="filesystem:/flyway/sql" info   || true
-                                    docker run --rm --network host -v "\${MDIR}:/flyway/sql" \\
-                                        flyway/flyway:9-alpine \\
-                                        -url="jdbc:postgresql://localhost:5432/coursechatbot" \\
-                                        -user="chatbot" -password="chatbot_secret" \\
-                                        -locations="filesystem:/flyway/sql" migrate
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash -s << 'REMOTE'
+                                    set -e
+                                    MIGRATION_DIR="${params.SERVER_DIR}/backend/src/main/resources/db/migration"
+
+                                    flyway_run() {
+                                        docker run --rm --network host \\
+                                            -v "\${MIGRATION_DIR}:/flyway/sql" \\
+                                            flyway/flyway:9-alpine \\
+                                            -url="jdbc:postgresql://localhost:5432/coursechatbot" \\
+                                            -user="chatbot" \\
+                                            -password="chatbot_secret" \\
+                                            -locations="filesystem:/flyway/sql" \\
+                                            "\$1"
+                                    }
+
+                                    echo "🗄️  Flyway status (before)..."
+                                    flyway_run info || true
+
+                                    echo "🗄️  Running Flyway migrate..."
+                                    flyway_run migrate
+
+                                    echo "✅ Flyway complete."
 REMOTE
                             """
                         }
