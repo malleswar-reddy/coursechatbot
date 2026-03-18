@@ -21,7 +21,7 @@ services:
     build: ./backend
     container_name: coursechatbot-backend
     ports:
-      - "8080:8080"
+      - "8000:8080"   # host:8000 → container:8080 (Spring Boot default)
     environment:
       # postgres and ollama are on the same compose network → use service names
       - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/coursechatbot
@@ -41,12 +41,12 @@ services:
       context: ./frontend
       args:
         # Public server IP — browser calls backend at this URL
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://100.114.88.111:8080}
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     container_name: coursechatbot-frontend
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://100.114.88.111:8080}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     depends_on:
       - backend
     restart: unless-stopped

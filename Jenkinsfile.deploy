@@ -90,7 +90,7 @@ pipeline {
                 sh """
                     sleep 15
                     echo "--- Backend API ---"
-                    curl -sf --max-time 10 http://${params.SERVER_HOST}:8080/api/courses/courseIds \\
+                    curl -sf --max-time 10 http://${params.SERVER_HOST}:8000/api/courses/courseIds \\
                         && echo "✅ Backend OK" \\
                         || echo "⚠️  Backend not responding yet"
 
@@ -107,7 +107,7 @@ pipeline {
         success {
             echo """
             ✅ Restart complete
-            Backend   : http://${params.SERVER_HOST}:8080
+            Backend   : http://${params.SERVER_HOST}:8000
             Frontend  : http://${params.SERVER_HOST}:3000
             Open WebUI: http://${params.SERVER_HOST}:3001
             """

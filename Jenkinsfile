@@ -80,7 +80,7 @@ pipeline {
         SSH_CRED_ID         = 'server-ssh-key'
         SSH_OPTS            = '-o StrictHostKeyChecking=no -o ConnectTimeout=30'
         COMPOSE_FILE        = 'docker-compose.server.yml'
-        NEXT_PUBLIC_API_URL = "http://${params.SERVER_HOST}:8080"
+        NEXT_PUBLIC_API_URL = "http://${params.SERVER_HOST}:8000"
         // In LOCAL mode the deploy dir = Jenkins workspace
         DEPLOY_DIR          = "${params.DEPLOY_MODE == 'local' ? env.WORKSPACE : params.SERVER_DIR}"
     }
@@ -250,7 +250,7 @@ REMOTE
 
                     echo "--- Backend API ---"
                     curl -sf --max-time 15 \\
-                        http://${params.SERVER_HOST}:8080/api/courses/courseIds \\
+                        http://${params.SERVER_HOST}:8000/api/courses/courseIds \\
                         && echo "✅ Backend OK" \\
                         || echo "⚠️  Backend not responding yet (check logs)"
 
@@ -271,7 +271,7 @@ REMOTE
             ============================================================
             ✅  DEPLOY SUCCESSFUL  [${params.DEPLOY_MODE} mode]
 
-            Backend   : http://${params.SERVER_HOST}:8080
+            Backend   : http://${params.SERVER_HOST}:8000
             Frontend  : http://${params.SERVER_HOST}:3000
             Open WebUI: http://${params.SERVER_HOST}:3001
             Ollama    : http://${params.SERVER_HOST}:11434

@@ -12,7 +12,7 @@ BUILD_BACKEND="${BUILD_BACKEND:-true}"
 BUILD_FRONTEND="${BUILD_FRONTEND:-true}"
 RESET_DB="${RESET_DB:-false}"
 OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:0.5b}"
-NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://100.114.88.111:8080}"
+NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:8000}"
 
 cd "$SERVER_DIR"
 echo ""
@@ -110,15 +110,15 @@ fi
 echo ""
 echo "[5/5] 🚀  Deploy backend + frontend..."
 
-# ── Free ports 8080 and 3000 before starting new containers ──────────────────
+# ── Free ports 8000 and 3000 before starting new containers ──────────────────
 echo "  Freeing ports..."
 
-# Stop + remove any container binding port 8080
-OLD_8080=$(docker ps -q --filter "publish=8080")
-if [ -n "$OLD_8080" ]; then
-    echo "  ⚠️  Port 8080 in use by container $OLD_8080 — stopping it"
-    docker stop "$OLD_8080" 2>/dev/null || true
-    docker rm   "$OLD_8080" 2>/dev/null || true
+# Stop + remove any container binding port 8000
+OLD_8000=$(docker ps -q --filter "publish=8000")
+if [ -n "$OLD_8000" ]; then
+    echo "  ⚠️  Port 8000 in use by container $OLD_8000 — stopping it"
+    docker stop "$OLD_8000" 2>/dev/null || true
+    docker rm   "$OLD_8000" 2>/dev/null || true
 fi
 
 # Stop + remove any container binding port 3000
@@ -135,7 +135,7 @@ docker rm   coursechatbot-backend  2>/dev/null || true
 docker stop coursechatbot-frontend 2>/dev/null || true
 docker rm   coursechatbot-frontend 2>/dev/null || true
 
-echo "  ✅ Ports 8080 and 3000 are free."
+echo "  ✅ Ports 8000 and 3000 are free."
 
 # ── Start backend + frontend with new images ──────────────────────────────────
 OLLAMA_MODEL="$OLLAMA_MODEL" \
@@ -154,7 +154,7 @@ sleep 20
 
 echo ""
 echo "  🔍 Backend:"
-curl -sf http://localhost:8080/api/courses/courseIds \
+curl -sf http://localhost:8000/api/courses/courseIds \
     && echo "  ✅ /api/courses/courseIds → OK" \
     || echo "  ⚠️  /api/courses/courseIds → not responding yet"
 
@@ -167,7 +167,7 @@ curl -sf http://localhost:3000/ -o /dev/null -w "  HTTP %{http_code}\n" \
 echo ""
 echo "============================================================"
 echo "  ✅  DEPLOY COMPLETE"
-echo "  Backend   : http://100.114.88.111:8080"
+echo "  Backend   : http://100.114.88.111:8000"
 echo "  Frontend  : http://100.114.88.111:3000"
 echo "  Open WebUI: http://100.114.88.111:3001"
 echo "  Ollama    : http://100.114.88.111:11434"
