@@ -1,5 +1,6 @@
 package com.coursechatbot.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.ollama.OllamaChatModel;
 import org.springframework.beans.factory.annotation.Value;
@@ -36,5 +37,11 @@ public class OllamaConfig {
                 .temperature(0.1)
                 .numPredict(numPredict)
                 .build();
+    }
+
+    /** Explicit ObjectMapper bean — WebFlux auto-config does not expose one by default. */
+    @Bean
+    public ObjectMapper objectMapper() {
+        return new ObjectMapper();
     }
 }

@@ -5,9 +5,9 @@ FROM maven:3.9.6-eclipse-temurin-17 AS builder
 WORKDIR /app
 COPY pom.xml .
 # Download dependencies first for layer caching
-RUN mvn dependency:go-offline -q
+RUN mvn dependency:go-offline
 COPY src ./src
-RUN mvn package -DskipTests -q
+RUN mvn package -DskipTests
 
 # ── Stage 2: Extract layered JAR ──────────────────────────────────────────────
 # Spring Boot 3.x layertools splits the fat-jar into 4 layers by change frequency:
