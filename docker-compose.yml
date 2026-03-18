@@ -3,25 +3,24 @@ services:
     build: ./backend
     container_name: coursechatbot-backend
     ports:
-      - "8080:8000"
+      - "8000:8080"   # host:8000 → container:8080 (Spring Boot default)
     environment:
-      # Datasource URL can be overridden via env or a .env file. Default is the compose postgres service.
-      - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL:-jdbc:postgresql://postgres:5432/coursechatbot}
+      # Postgres is running on the host — use host.docker.internal to reach it from inside the container
+      - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL:-jdbc:postgresql://localhost:5432/coursechatbot}
       - SPRING_DATASOURCE_USERNAME=${SPRING_DATASOURCE_USERNAME:-chatbot}
       - SPRING_DATASOURCE_PASSWORD=${SPRING_DATASOURCE_PASSWORD:-chatbot_secret}
       # Ollama settings (can be overridden)
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://100.114.88.111:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:0.5b}
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # NEXT_PUBLIC_* must be build args — Next.js bakes them into the JS bundle at build time
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     container_name: coursechatbot-frontend
     ports:
       - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
     depends_on:
       - backend
