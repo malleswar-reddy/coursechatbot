@@ -29,7 +29,7 @@ services:
       - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL:-jdbc:postgresql://host.docker.internal:5432/coursechatbot}
       - SPRING_DATASOURCE_USERNAME=${SPRING_DATASOURCE_USERNAME:-chatbot}
       - SPRING_DATASOURCE_PASSWORD=${SPRING_DATASOURCE_PASSWORD:-chatbot_secret}
-      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_BASE_URL=http://localhost:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:0.5b}
     depends_on:
       ollama:
