@@ -7,6 +7,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
@@ -35,18 +36,18 @@ public class CourseController {
      * }
      */
     @PostMapping
-    public ResponseEntity<Map<String, Object>> ingest(@Valid @RequestBody IngestRequest request) {
+    public Mono<ResponseEntity<Map<String, Object>>> ingest(@Valid @RequestBody IngestRequest request) {
         log.info("Ingest request for courseId={}", request.getCourseId());
-        int pagesIngested = ingestionService.ingest(request.getCourseId(), request.getIndexJson());
-        return ResponseEntity.ok(Map.of(
-                "courseId", request.getCourseId(),
-                "pagesIngested", pagesIngested,
-                "status", "ok"
-        ));
+        return ingestionService.ingest(request.getCourseId(), request.getIndexJson())
+                .map(pagesIngested -> ResponseEntity.ok(Map.<String, Object>of(
+                        "courseId",      request.getCourseId(),
+                        "pagesIngested", pagesIngested,
+                        "status",        "ok"
+                )));
     }
 
     @GetMapping("/courseIds")
-    public List<String> getAllCourseIds() {
+    public Mono<List<String>> getAllCourseIds() {
         return ingestionService.getAllCourseIds();
     }
 }

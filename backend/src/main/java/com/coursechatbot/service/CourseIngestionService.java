@@ -8,18 +8,20 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
 
 /**
- * Handles ingestion of a PageIndex JSON (produced by build_index.py) into PostgreSQL.
+ * Handles ingestion of a PageIndex JSON into PostgreSQL — fully reactive.
  *
- * Stores:
- *   - The hierarchical index (without page texts) in the course_index table.
- *   - Each page's text in the course_content table.
+ * R2dbcEntityTemplate.insert() is used for CourseIndex so that a String @Id
+ * always triggers INSERT (not an UPDATE attempt) even when the ID is non-null.
  */
 @Service
 @Slf4j
@@ -27,53 +29,47 @@ import java.util.Map;
 public class CourseIngestionService {
 
     private final CourseContentRepository contentRepository;
-    private final CourseIndexRepository indexRepository;
-    private final ObjectMapper objectMapper;
+    private final CourseIndexRepository   indexRepository;
+    private final R2dbcEntityTemplate     r2dbcTemplate;
+    private final ObjectMapper            objectMapper;
 
-    public List<String> getAllCourseIds() {
-        return indexRepository.findAll().stream()
+    public Mono<List<String>> getAllCourseIds() {
+        return indexRepository.findAll()
                 .map(CourseIndex::getCourseId)
-                .toList();
+                .collectList();
     }
 
     @Transactional
-    public int ingest(String courseId, String indexJson) {
+    public Mono<Integer> ingest(String courseId, String indexJson) {
         Map<String, Object> indexMap = parseJson(indexJson);
 
-        // Strip inline pages from the index and store them separately
         @SuppressWarnings("unchecked")
         Map<String, String> pages = (Map<String, String>) indexMap.remove("pages");
 
-        // Persist the index (without pages)
-        String indexWithoutPages = toJson(indexMap);
-        CourseIndex courseIndex = CourseIndex.builder()
+        String       indexWithoutPages = toJson(indexMap);
+        CourseIndex  courseIndex       = CourseIndex.builder()
                 .courseId(courseId)
                 .indexJson(indexWithoutPages)
                 .build();
-        indexRepository.save(courseIndex);
-        log.info("Saved course index for courseId={}", courseId);
 
-        // Remove existing pages and re-insert
-        contentRepository.deleteByCourseId(courseId);
-
-        int count = 0;
-        if (pages != null) {
-            for (Map.Entry<String, String> entry : pages.entrySet()) {
-                int pageNum = Integer.parseInt(entry.getKey());
-                CourseContent cc = CourseContent.builder()
-                        .courseId(courseId)
-                        .pageNumber(pageNum)
-                        .content(entry.getValue())
-                        .build();
-                contentRepository.save(cc);
-                count++;
-            }
-        }
-        log.info("Ingested {} pages for courseId={}", count, courseId);
-        return count;
+        return contentRepository.deleteByCourseId(courseId)           // 1. delete old pages
+                .then(indexRepository.deleteById(courseId))            // 2. delete old index
+                .then(r2dbcTemplate.insert(courseIndex))               // 3. INSERT new index (always)
+                .doOnSuccess(i -> log.info("Saved course index for courseId={}", courseId))
+                .then(pages != null
+                        ? Flux.fromIterable(pages.entrySet())
+                              .map(e -> CourseContent.builder()
+                                      .courseId(courseId)
+                                      .pageNumber(Integer.parseInt(e.getKey()))
+                                      .content(e.getValue())
+                                      .build())
+                              .as(contentRepository::saveAll)          // 4. INSERT all pages
+                              .count()
+                              .map(Long::intValue)
+                        : Mono.just(0))
+                .doOnSuccess(count -> log.info("Ingested {} pages for courseId={}", count, courseId));
     }
 
-    @SuppressWarnings("unchecked")
     private Map<String, Object> parseJson(String json) {
         try {
             return objectMapper.readValue(json, new TypeReference<Map<String, Object>>() {});

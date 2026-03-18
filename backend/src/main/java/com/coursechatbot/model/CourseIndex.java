@@ -1,19 +1,18 @@
 package com.coursechatbot.model;
 
-import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.relational.core.mapping.Column;
+import org.springframework.data.relational.core.mapping.Table;
 
 /**
  * Stores the hierarchical PageIndex JSON for a course.
  * One row per course, keyed by course_id.
  */
-@Entity
-@Table(name = "course_index")
+@Table("course_index")
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -21,7 +20,7 @@ import org.hibernate.type.SqlTypes;
 public class CourseIndex {
 
     @Id
-    @Column(name = "course_id")
+    @Column("course_id")
     private String courseId;
 
     /**
@@ -35,6 +34,6 @@ public class CourseIndex {
      *   ]
      * }
      */
-    @Column(name = "index_json", columnDefinition = "TEXT", nullable = false)
+    @Column("index_json")
     private String indexJson;
 }

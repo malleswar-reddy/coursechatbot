@@ -1,30 +1,21 @@
 package com.coursechatbot.repository;
 
 import com.coursechatbot.model.CourseContent;
-import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.repository.query.Param;
+import org.springframework.data.r2dbc.repository.Query;
+import org.springframework.data.repository.reactive.ReactiveCrudRepository;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
-import java.util.List;
-
-public interface CourseContentRepository extends JpaRepository<CourseContent, Long> {
+public interface CourseContentRepository extends ReactiveCrudRepository<CourseContent, Long> {
 
     /**
      * Retrieve page texts for a course within an inclusive page range.
-     * Used by the PageIndex RAG flow after the LLM has selected a chapter.
+     * Used by the PageIndex RAG flow after the keyword selector picks a chapter.
      */
-    @Query("""
-           SELECT c FROM CourseContent c
-           WHERE c.courseId = :courseId
-             AND c.pageNumber BETWEEN :startPage AND :endPage
-           ORDER BY c.pageNumber ASC
-           """)
-    List<CourseContent> findPageRange(
-            @Param("courseId") String courseId,
-            @Param("startPage") int startPage,
-            @Param("endPage") int endPage
-    );
+    @Query("SELECT * FROM course_content WHERE course_id = :courseId " +
+           "AND page_number BETWEEN :startPage AND :endPage ORDER BY page_number ASC")
+    Flux<CourseContent> findPageRange(String courseId, int startPage, int endPage);
 
     /** Delete all pages for a course (used when re-ingesting). */
-    void deleteByCourseId(String courseId);
+    Mono<Void> deleteByCourseId(String courseId);
 }

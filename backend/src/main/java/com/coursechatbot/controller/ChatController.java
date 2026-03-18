@@ -8,6 +8,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Mono;
 
 /**
  * REST API for the PageIndex-powered course chatbot.
@@ -42,9 +43,9 @@ public class ChatController {
      * }
      */
     @PostMapping
-    public ResponseEntity<ChatResponse> chat(@Valid @RequestBody ChatRequest request) {
+    public Mono<ResponseEntity<ChatResponse>> chat(@Valid @RequestBody ChatRequest request) {
         log.info("Chat request: courseId={}, question={}", request.getCourseId(), request.getQuestion());
-        ChatResponse response = pageIndexService.answer(request.getCourseId(), request.getQuestion());
-        return ResponseEntity.ok(response);
+        return pageIndexService.answer(request.getCourseId(), request.getQuestion())
+                .map(ResponseEntity::ok);
     }
 }

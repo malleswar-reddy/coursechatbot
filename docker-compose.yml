@@ -9,6 +9,7 @@ services:
     environment:
       # Postgres is running on the host — use host.docker.internal to reach it from inside the container
       - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL:-jdbc:postgresql://host.docker.internal:5432/coursechatbot}
+      - SPRING_R2DBC_URL=${SPRING_R2DBC_URL:-r2dbc:postgresql://host.docker.internal:5432/coursechatbot}
       - SPRING_DATASOURCE_USERNAME=${SPRING_DATASOURCE_USERNAME:-chatbot}
       - SPRING_DATASOURCE_PASSWORD=${SPRING_DATASOURCE_PASSWORD:-chatbot_secret}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://100.114.88.111:11434}
