@@ -22,16 +22,16 @@ services:
     container_name: coursechatbot-backend
     ports:
       - "8000:8080"   # host:8000 → container:8080 (Spring Boot default)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux: resolves to host IP so we can reach host-side postgres
     environment:
-      # postgres and ollama are on the same compose network → use service names
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/coursechatbot
-      - SPRING_DATASOURCE_USERNAME=chatbot
-      - SPRING_DATASOURCE_PASSWORD=chatbot_secret
+      # Postgres runs on the host (or a different compose network) → reach it via host.docker.internal
+      - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL:-jdbc:postgresql://host.docker.internal:5432/coursechatbot}
+      - SPRING_DATASOURCE_USERNAME=${SPRING_DATASOURCE_USERNAME:-chatbot}
+      - SPRING_DATASOURCE_PASSWORD=${SPRING_DATASOURCE_PASSWORD:-chatbot_secret}
       - OLLAMA_BASE_URL=http://ollama:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:0.5b}
     depends_on:
-      postgres:
-        condition: service_healthy
       ollama:
         condition: service_started
     restart: unless-stopped
@@ -41,12 +41,12 @@ services:
       context: ./frontend
       args:
         # Public server IP — browser calls backend at this URL
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://100.114.88.111:8000}
     container_name: coursechatbot-frontend
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://100.114.88.111:8000}
     depends_on:
       - backend
     restart: unless-stopped

@@ -4,12 +4,13 @@ services:
     container_name: coursechatbot-backend
     ports:
       - "8000:8080"   # host:8000 → container:8080 (Spring Boot default)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Linux: resolves to host IP
     environment:
       # Postgres is running on the host — use host.docker.internal to reach it from inside the container
-      - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL:-jdbc:postgresql://localhost:5432/coursechatbot}
+      - SPRING_DATASOURCE_URL=${SPRING_DATASOURCE_URL:-jdbc:postgresql://host.docker.internal:5432/coursechatbot}
       - SPRING_DATASOURCE_USERNAME=${SPRING_DATASOURCE_USERNAME:-chatbot}
       - SPRING_DATASOURCE_PASSWORD=${SPRING_DATASOURCE_PASSWORD:-chatbot_secret}
-      # Ollama settings (can be overridden)
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://100.114.88.111:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:0.5b}
 
