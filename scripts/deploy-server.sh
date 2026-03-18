@@ -105,18 +105,39 @@ fi
 
 # ── Step 5: Deploy backend + frontend only ────────────────────────────────────
 # postgres + ollama + open-webui are already running under a DIFFERENT compose
-# project (/home/dell/chatbot).  Passing their names to "docker compose up"
-# would cause a "container name already in use" conflict.
-# --no-deps  → do NOT start any depends_on services (postgres/ollama already up)
-# Stop + rm old containers first so new images are used cleanly.
+# project (/home/dell/chatbot). --no-deps skips depends_on so those containers
+# are never touched (avoids "container name already in use" conflict).
 echo ""
 echo "[5/5] 🚀  Deploy backend + frontend..."
 
+# ── Free ports 8080 and 3000 before starting new containers ──────────────────
+echo "  Freeing ports..."
+
+# Stop + remove any container binding port 8080
+OLD_8080=$(docker ps -q --filter "publish=8080")
+if [ -n "$OLD_8080" ]; then
+    echo "  ⚠️  Port 8080 in use by container $OLD_8080 — stopping it"
+    docker stop "$OLD_8080" 2>/dev/null || true
+    docker rm   "$OLD_8080" 2>/dev/null || true
+fi
+
+# Stop + remove any container binding port 3000
+OLD_3000=$(docker ps -q --filter "publish=3000")
+if [ -n "$OLD_3000" ]; then
+    echo "  ⚠️  Port 3000 in use by container $OLD_3000 — stopping it"
+    docker stop "$OLD_3000" 2>/dev/null || true
+    docker rm   "$OLD_3000" 2>/dev/null || true
+fi
+
+# Remove old named containers by name (handles stopped-but-not-removed state)
 docker stop coursechatbot-backend  2>/dev/null || true
 docker rm   coursechatbot-backend  2>/dev/null || true
 docker stop coursechatbot-frontend 2>/dev/null || true
 docker rm   coursechatbot-frontend 2>/dev/null || true
 
+echo "  ✅ Ports 8080 and 3000 are free."
+
+# ── Start backend + frontend with new images ──────────────────────────────────
 OLLAMA_MODEL="$OLLAMA_MODEL" \
 NEXT_PUBLIC_API_URL="$NEXT_PUBLIC_API_URL" \
 docker compose -f "$COMPOSE_FILE" up -d --no-deps backend frontend
