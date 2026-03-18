@@ -1,38 +1,57 @@
 // =============================================================================
 // Jenkinsfile — CourseChatbot CI/CD Pipeline
-// Syncs code to remote server and deploys all services via docker compose
 // =============================================================================
 //
-// Prerequisites (configure once in Jenkins):
-//   1. SSH credential:  Manage Jenkins → Credentials → Add
-//                       Kind: "SSH Username with private key"
-//                       ID:   server-ssh-key
-//                       User: dell
-//                       Key:  paste your private key (~/.ssh/id_rsa)
+//  TWO DEPLOY MODES — choose with DEPLOY_MODE parameter:
 //
-//   2. Plugins required:
-//       - SSH Agent Plugin  (for sshagent{})
-//       - Git Plugin        (for checkout scm)
+//  LOCAL  (default — no SSH keys needed)
+//  ──────
+//  Jenkins runs ON the same server as Docker.
+//  No SSH, no rsync. Jenkins workspace IS the build directory.
+//  Docker commands run directly.
+//  ✅ Use this now — no credential setup required.
 //
-//   3. Jenkins agent must have:
-//       - rsync  installed  (brew install rsync  on Mac / apt install rsync on Linux)
-//       - ssh    installed  (usually pre-installed)
+//  REMOTE  (SSH to separate server)
+//  ──────
+//  Jenkins runs on a different machine, deploys to a remote server via SSH.
+//  Requires Jenkins credential ID: server-ssh-key
+//  (Manage Jenkins → Credentials → Add → SSH Username with private key)
+//  Set up later when SSH keys are ready.
+//
+//  PREREQUISITES — LOCAL mode
+//  ──────────────────────────
+//  Jenkins server must have:
+//    ✅ Docker + docker compose  installed
+//    ✅ Jenkins user added to docker group:
+//         sudo usermod -aG docker jenkins && sudo systemctl restart jenkins
+//
+//  PREREQUISITES — REMOTE mode (later)
+//  ────────────────────────────────────
+//    ✅ SSH Agent Plugin installed in Jenkins
+//    ✅ Credential ID: server-ssh-key  (SSH Username with private key)
+//    ✅ rsync installed on Jenkins agent
 // =============================================================================
 
 pipeline {
     agent any
 
-    // ── Parameters (shown as form fields when you click "Build with Parameters") ──
     parameters {
+        choice(
+            name: 'DEPLOY_MODE',
+            choices: ['local', 'remote'],
+            description: '''Deploy mode:
+  local  = Jenkins runs ON the same server as Docker (no SSH keys needed) ✅
+  remote = Jenkins SSHes to a separate server (needs server-ssh-key credential)'''
+        )
         booleanParam(
             name: 'BUILD_BACKEND',
             defaultValue: true,
-            description: '🏗️  Rebuild the Spring Boot backend Docker image on server'
+            description: '🏗️  Rebuild the Spring Boot backend Docker image'
         )
         booleanParam(
             name: 'BUILD_FRONTEND',
             defaultValue: true,
-            description: '🎨  Rebuild the Next.js frontend Docker image on server'
+            description: '🎨  Rebuild the Next.js frontend Docker image'
         )
         booleanParam(
             name: 'RESET_DB',
@@ -47,49 +66,53 @@ pipeline {
         string(
             name: 'SERVER_HOST',
             defaultValue: '100.114.88.111',
-            description: '🌐  Target server IP or hostname'
+            description: '🌐  Server IP (used for smoke test URLs and REMOTE mode SSH)'
         )
         string(
             name: 'SERVER_DIR',
             defaultValue: '/home/dell/chatbot',
-            description: '📁  Directory on server that holds docker-compose.server.yml'
+            description: '📁  Project dir on server (REMOTE mode only — LOCAL uses Jenkins workspace)'
         )
     }
 
-    // ── Fixed environment variables ───────────────────────────────────────────
     environment {
-        SERVER_USER       = 'dell'
-        SSH_CRED_ID       = 'server-ssh-key'          // Jenkins credential ID
-        COMPOSE_FILE      = 'docker-compose.server.yml'
+        SERVER_USER         = 'dell'
+        SSH_CRED_ID         = 'server-ssh-key'
+        SSH_OPTS            = '-o StrictHostKeyChecking=no -o ConnectTimeout=30'
+        COMPOSE_FILE        = 'docker-compose.server.yml'
         NEXT_PUBLIC_API_URL = "http://${params.SERVER_HOST}:8080"
-        SSH_OPTS          = '-o StrictHostKeyChecking=no -o ConnectTimeout=30'
+        // In LOCAL mode the deploy dir = Jenkins workspace
+        DEPLOY_DIR          = "${params.DEPLOY_MODE == 'local' ? env.WORKSPACE : params.SERVER_DIR}"
     }
 
     stages {
 
-        // ── Stage 1: Checkout source ──────────────────────────────────────────
+        // ── Stage 1: Checkout ─────────────────────────────────────────────────
         stage('Checkout') {
             steps {
                 echo "📥 Checking out source..."
                 checkout scm
                 sh "git log --oneline -5 || true"
+                echo "🚀 Deploy mode : ${params.DEPLOY_MODE}"
+                echo "📁 Deploy dir  : ${env.DEPLOY_DIR}"
             }
         }
 
-        // ── Stage 2: Sync project files to server via rsync ───────────────────
+        // ── Stage 2: Sync files (REMOTE mode only) ────────────────────────────
+        // LOCAL mode: Jenkins workspace already has the code — skip rsync entirely
+        // REMOTE mode: rsync workspace to server
         stage('Sync to Server') {
+            when {
+                expression { params.DEPLOY_MODE == 'remote' }
+            }
             steps {
                 sshagent(credentials: [env.SSH_CRED_ID]) {
                     sh """
                         echo "📤 Syncing files to ${SERVER_USER}@${params.SERVER_HOST}:${params.SERVER_DIR} ..."
                         rsync -avz --delete \\
-                            --exclude='.git' \\
-                            --exclude='target' \\
-                            --exclude='node_modules' \\
-                            --exclude='.next' \\
-                            --exclude='*.log' \\
-                            --exclude='uploads' \\
-                            --exclude='index_output' \\
+                            --exclude='.git' --exclude='target' \\
+                            --exclude='node_modules' --exclude='.next' \\
+                            --exclude='*.log' --exclude='uploads' --exclude='index_output' \\
                             -e "ssh ${SSH_OPTS}" \\
                             "\${WORKSPACE}/" \\
                             "${SERVER_USER}@${params.SERVER_HOST}:${params.SERVER_DIR}/"
@@ -99,146 +122,178 @@ pipeline {
             }
         }
 
-        // ── Stage 3: Make deploy script executable on server ─────────────────
-        stage('Prepare Server') {
+        // ── Stage 3: Prepare deploy script ────────────────────────────────────
+        stage('Prepare') {
             steps {
-                sshagent(credentials: [env.SSH_CRED_ID]) {
-                    sh """
-                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
-                            "chmod +x ${params.SERVER_DIR}/scripts/deploy-server.sh"
-                    """
+                script {
+                    if (params.DEPLOY_MODE == 'local') {
+                        // LOCAL: just chmod the script directly in workspace
+                        sh "chmod +x ${env.WORKSPACE}/scripts/deploy-server.sh"
+                        echo "✅ deploy-server.sh ready (local mode)"
+                    } else {
+                        // REMOTE: chmod on the server
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
+                                    "chmod +x ${params.SERVER_DIR}/scripts/deploy-server.sh"
+                            """
+                        }
+                        echo "✅ deploy-server.sh ready (remote mode)"
+                    }
                 }
             }
         }
 
-        // ── Stage 4: Run Flyway DB migrations on server ───────────────────────
-        //
-        //  Runs BEFORE the backend starts so the schema is always up to date.
-        //  Uses the official flyway/flyway Docker image (no Java/Maven needed).
-        //  Reads V*.sql files from backend/src/main/resources/db/migration/
-        //  (already rsync'd to server in Stage 2 above).
-        // ─────────────────────────────────────────────────────────────────────
+        // ── Stage 4: DB Migrate (Flyway) ─────────────────────────────────────
         stage('DB Migrate') {
             steps {
-                sshagent(credentials: [env.SSH_CRED_ID]) {
-                    sh """
-                        echo "🗄️  Running Flyway migrations on server..."
-                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash << 'REMOTE'
-                            MIGRATION_DIR="${params.SERVER_DIR}/backend/src/main/resources/db/migration"
-
-                            # Show current status
-                            echo "--- Migration status BEFORE ---"
-                            docker run --rm \
-                                --network host \
-                                -v "\${MIGRATION_DIR}:/flyway/sql" \
-                                flyway/flyway:9-alpine \
-                                -url="jdbc:postgresql://localhost:5432/coursechatbot" \
-                                -user="chatbot" \
-                                -password="chatbot_secret" \
-                                -locations="filesystem:/flyway/sql" \
-                                info
-
-                            # Apply pending migrations
-                            echo "--- Applying migrations ---"
-                            docker run --rm \
-                                --network host \
-                                -v "\${MIGRATION_DIR}:/flyway/sql" \
-                                flyway/flyway:9-alpine \
-                                -url="jdbc:postgresql://localhost:5432/coursechatbot" \
-                                -user="chatbot" \
-                                -password="chatbot_secret" \
-                                -locations="filesystem:/flyway/sql" \
-                                migrate
-
-                            echo "✅ Flyway migrate complete."
-REMOTE
+                script {
+                    def migrationDir = "${env.DEPLOY_DIR}/backend/src/main/resources/db/migration"
+                    def flywaycmd = """
+                        docker run --rm \\
+                            --network host \\
+                            -v "${migrationDir}:/flyway/sql" \\
+                            flyway/flyway:9-alpine \\
+                            -url="jdbc:postgresql://localhost:5432/coursechatbot" \\
+                            -user="chatbot" \\
+                            -password="chatbot_secret" \\
+                            -locations="filesystem:/flyway/sql"
                     """
+
+                    if (params.DEPLOY_MODE == 'local') {
+                        sh """
+                            echo "🗄️  Running Flyway on local Docker..."
+                            echo "--- status before ---"
+                            ${flywaycmd} info  || true
+                            echo "--- migrate ---"
+                            ${flywaycmd} migrate
+                            echo "✅ Flyway complete."
+                        """
+                    } else {
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash << 'REMOTE'
+                                    MDIR="${params.SERVER_DIR}/backend/src/main/resources/db/migration"
+                                    docker run --rm --network host -v "\${MDIR}:/flyway/sql" \\
+                                        flyway/flyway:9-alpine \\
+                                        -url="jdbc:postgresql://localhost:5432/coursechatbot" \\
+                                        -user="chatbot" -password="chatbot_secret" \\
+                                        -locations="filesystem:/flyway/sql" info   || true
+                                    docker run --rm --network host -v "\${MDIR}:/flyway/sql" \\
+                                        flyway/flyway:9-alpine \\
+                                        -url="jdbc:postgresql://localhost:5432/coursechatbot" \\
+                                        -user="chatbot" -password="chatbot_secret" \\
+                                        -locations="filesystem:/flyway/sql" migrate
+REMOTE
+                            """
+                        }
+                    }
                 }
             }
         }
 
-        // ── Stage 5: Run deploy script on server ──────────────────────────────
-        stage('Deploy on Server') {
+        // ── Stage 5: Deploy services ──────────────────────────────────────────
+        stage('Deploy') {
             steps {
-                sshagent(credentials: [env.SSH_CRED_ID]) {
-                    sh """
-                        echo "🚀 Running deploy-server.sh on ${params.SERVER_HOST} ..."
-                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
-                            "SERVER_DIR=${params.SERVER_DIR} \\
+                script {
+                    def deployEnv = """SERVER_DIR=${env.DEPLOY_DIR} \\
                              COMPOSE_FILE=${COMPOSE_FILE} \\
                              BUILD_BACKEND=${params.BUILD_BACKEND} \\
                              BUILD_FRONTEND=${params.BUILD_FRONTEND} \\
                              RESET_DB=${params.RESET_DB} \\
                              OLLAMA_MODEL=${params.OLLAMA_MODEL} \\
-                             NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL} \\
-                             bash ${params.SERVER_DIR}/scripts/deploy-server.sh"
-                    """
+                             NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}"""
+
+                    if (params.DEPLOY_MODE == 'local') {
+                        sh """
+                            echo "🚀 Deploying locally (no SSH)..."
+                            ${deployEnv} \\
+                            bash ${env.WORKSPACE}/scripts/deploy-server.sh
+                        """
+                    } else {
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                echo "🚀 Deploying on ${params.SERVER_HOST} via SSH..."
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
+                                    "${deployEnv} \\
+                                     bash ${params.SERVER_DIR}/scripts/deploy-server.sh"
+                            """
+                        }
+                    }
                 }
             }
         }
 
-        // ── Stage 5: Smoke test from Jenkins ─────────────────────────────────
+        // ── Stage 6: Smoke Test ───────────────────────────────────────────────
         stage('Smoke Test') {
             steps {
                 sh """
                     echo "🧪 Smoke testing ${params.SERVER_HOST} ..."
-                    sleep 5
+                    sleep 10
 
-                    echo ""
                     echo "--- Backend API ---"
-                    curl -sf --max-time 10 \\
+                    curl -sf --max-time 15 \\
                         http://${params.SERVER_HOST}:8080/api/courses/courseIds \\
-                        && echo "✅ /api/courses/courseIds OK" \\
-                        || echo "⚠️  Backend not responding (check server logs)"
+                        && echo "✅ Backend OK" \\
+                        || echo "⚠️  Backend not responding yet (check logs)"
 
-                    echo ""
                     echo "--- Frontend ---"
-                    curl -sf --max-time 10 \\
+                    curl -sf --max-time 15 \\
                         http://${params.SERVER_HOST}:3000/ \\
                         -o /dev/null -w "HTTP %{http_code}\\n" \\
                         && echo "✅ Frontend OK" \\
-                        || echo "⚠️  Frontend not responding (check server logs)"
+                        || echo "⚠️  Frontend not responding yet (check logs)"
                 """
             }
         }
     }
 
-    // ── Post actions ──────────────────────────────────────────────────────────
     post {
         success {
             echo """
             ============================================================
-            ✅  DEPLOY SUCCESSFUL
+            ✅  DEPLOY SUCCESSFUL  [${params.DEPLOY_MODE} mode]
 
-            Server      : ${params.SERVER_HOST}
-            Backend     : http://${params.SERVER_HOST}:8080
-            Frontend    : http://${params.SERVER_HOST}:3000
-            Open WebUI  : http://${params.SERVER_HOST}:3001
-            Ollama      : http://${params.SERVER_HOST}:11434
-            DB          : ${params.SERVER_HOST}:5432  db=coursechatbot user=chatbot
+            Backend   : http://${params.SERVER_HOST}:8080
+            Frontend  : http://${params.SERVER_HOST}:3000
+            Open WebUI: http://${params.SERVER_HOST}:3001
+            Ollama    : http://${params.SERVER_HOST}:11434
             ============================================================
             """
         }
         failure {
-            echo "❌ Pipeline FAILED — fetching server logs..."
-            sshagent(credentials: [env.SSH_CRED_ID]) {
-                sh """
-                    ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} '
+            echo "❌ Pipeline FAILED"
+            script {
+                if (params.DEPLOY_MODE == 'local') {
+                    // LOCAL: read logs directly, no SSH needed
+                    sh """
                         echo "=== backend logs ==="
                         docker logs coursechatbot-backend  --tail 60 2>/dev/null || true
                         echo "=== postgres logs ==="
                         docker logs coursechatbot-postgres --tail 40 2>/dev/null || true
-                        echo "=== frontend logs ==="
-                        docker logs coursechatbot-frontend --tail 30 2>/dev/null || true
                         echo "=== compose status ==="
-                        docker compose -f /home/dell/chatbot/docker-compose.server.yml ps 2>/dev/null || true
-                    ' || true
-                """
+                        docker compose -f ${env.WORKSPACE}/${COMPOSE_FILE} ps 2>/dev/null || true
+                    """
+                } else {
+                    try {
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} '
+                                    docker logs coursechatbot-backend  --tail 60 2>/dev/null || true
+                                    docker logs coursechatbot-postgres --tail 40 2>/dev/null || true
+                                    docker compose -f /home/dell/chatbot/docker-compose.server.yml ps 2>/dev/null || true
+                                ' || true
+                            """
+                        }
+                    } catch (Exception e) {
+                        echo "⚠️  Could not fetch server logs: ${e.message}"
+                        echo "    → Add Jenkins credential ID: server-ssh-key  (for REMOTE mode)"
+                    }
+                }
             }
         }
         always {
-            echo "Build #${env.BUILD_NUMBER} finished — ${currentBuild.currentResult}"
+            echo "Build #${env.BUILD_NUMBER} — ${currentBuild.currentResult} — mode: ${params.DEPLOY_MODE}"
         }
     }
 }
-
