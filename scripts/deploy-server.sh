@@ -104,12 +104,14 @@ else
 fi
 
 # ── Step 5: Deploy backend + frontend only ────────────────────────────────────
-# Use --no-recreate for postgres and ollama (already running from host)
-# Force recreate backend and frontend to pick up new images
+# postgres + ollama + open-webui are already running under a DIFFERENT compose
+# project (/home/dell/chatbot).  Passing their names to "docker compose up"
+# would cause a "container name already in use" conflict.
+# --no-deps  → do NOT start any depends_on services (postgres/ollama already up)
+# Stop + rm old containers first so new images are used cleanly.
 echo ""
 echo "[5/5] 🚀  Deploy backend + frontend..."
 
-# Stop old backend/frontend first so new image is used
 docker stop coursechatbot-backend  2>/dev/null || true
 docker rm   coursechatbot-backend  2>/dev/null || true
 docker stop coursechatbot-frontend 2>/dev/null || true
@@ -117,9 +119,7 @@ docker rm   coursechatbot-frontend 2>/dev/null || true
 
 OLLAMA_MODEL="$OLLAMA_MODEL" \
 NEXT_PUBLIC_API_URL="$NEXT_PUBLIC_API_URL" \
-docker compose -f "$COMPOSE_FILE" up -d \
-    --no-recreate \
-    --remove-orphans
+docker compose -f "$COMPOSE_FILE" up -d --no-deps backend frontend
 
 echo ""
 echo "============================================================"
