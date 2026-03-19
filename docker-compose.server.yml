@@ -41,13 +41,13 @@ services:
     build:
       context: ./frontend
       args:
-        # Public server IP — browser calls backend at this URL
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://hirevitae-chatbotapi.chakritech.org}
+        # Browser calls backend via Cloudflare tunnel — must be HTTPS (mixed content blocked otherwise)
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://hirevitae-chatbotapi.chakritech.org}
     container_name: coursechatbot-frontend
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://hirevitae-chatbotapi.chakritech.org}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://hirevitae-chatbotapi.chakritech.org}
     depends_on:
       - backend
     restart: unless-stopped

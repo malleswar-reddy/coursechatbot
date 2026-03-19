@@ -73,6 +73,11 @@ pipeline {
             defaultValue: '/home/dell/chatbot',
             description: '📁  Project dir on server (REMOTE mode only — LOCAL uses Jenkins workspace)'
         )
+        string(
+            name: 'NEXT_PUBLIC_API_URL',
+            defaultValue: 'https://hirevitae-chatbotapi.chakritech.org',
+            description: '🌐  Public API URL baked into the frontend bundle (must be HTTPS when served via tunnel)'
+        )
     }
 
     environment {
@@ -80,7 +85,7 @@ pipeline {
         SSH_CRED_ID         = 'server-ssh-key'
         SSH_OPTS            = '-o StrictHostKeyChecking=no -o ConnectTimeout=30'
         COMPOSE_FILE        = 'docker-compose.server.yml'
-        NEXT_PUBLIC_API_URL = "http://${params.SERVER_HOST}:8000"
+        NEXT_PUBLIC_API_URL = "${params.NEXT_PUBLIC_API_URL}"
         // In LOCAL mode the deploy dir = Jenkins workspace
         DEPLOY_DIR          = "${params.DEPLOY_MODE == 'local' ? env.WORKSPACE : params.SERVER_DIR}"
     }
@@ -245,16 +250,16 @@ REMOTE
         stage('Smoke Test') {
             steps {
                 sh """
-                    echo "🧪 Smoke testing ${params.SERVER_HOST} ..."
+                    echo "🧪 Smoke testing via tunnel ..."
                     sleep 10
 
-                    echo "--- Backend API ---"
+                    echo "--- Backend API (tunnel) ---"
                     curl -sf --max-time 15 \\
-                        http://${params.SERVER_HOST}:8000/api/courses/courseIds \\
+                        ${params.NEXT_PUBLIC_API_URL}/api/courses/courseIds \\
                         && echo "✅ Backend OK" \\
                         || echo "⚠️  Backend not responding yet (check logs)"
 
-                    echo "--- Frontend ---"
+                    echo "--- Frontend (direct) ---"
                     curl -sf --max-time 15 \\
                         http://${params.SERVER_HOST}:3000/ \\
                         -o /dev/null -w "HTTP %{http_code}\\n" \\
@@ -271,10 +276,11 @@ REMOTE
             ============================================================
             ✅  DEPLOY SUCCESSFUL  [${params.DEPLOY_MODE} mode]
 
-            Backend   : http://${params.SERVER_HOST}:8000
-            Frontend  : http://${params.SERVER_HOST}:3000
-            Open WebUI: http://${params.SERVER_HOST}:3001
-            Ollama    : http://${params.SERVER_HOST}:11434
+            Frontend  (tunnel) : https://hirevitae-chatbot.chakritech.org
+            Backend   (tunnel) : ${params.NEXT_PUBLIC_API_URL}
+            Backend   (direct) : http://${params.SERVER_HOST}:8000
+            Frontend  (direct) : http://${params.SERVER_HOST}:3000
+            Open WebUI         : http://${params.SERVER_HOST}:3001
             ============================================================
             """
         }
