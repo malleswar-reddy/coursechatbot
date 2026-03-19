@@ -8,8 +8,7 @@ import com.coursechatbot.repository.CourseIndexRepository;
 import com.coursechatbot.service.PageIndexService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.message.AiMessage;
-import dev.langchain4j.model.chat.ChatLanguageModel;
-import dev.langchain4j.model.output.Response;
+import dev.langchain4j.model.chat.ChatModel;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -32,7 +31,7 @@ class PageIndexServiceTest {
 
     @Mock private CourseContentRepository contentRepository;
     @Mock private CourseIndexRepository   indexRepository;
-    @Mock private ChatLanguageModel       chatLanguageModel;
+    @Mock private ChatModel               chatModel;
 
     private PageIndexService pageIndexService;
 
@@ -62,7 +61,7 @@ class PageIndexServiceTest {
     void setUp() {
         // Construct service manually so we can supply a real ObjectMapper
         pageIndexService = new PageIndexService(
-                contentRepository, indexRepository, chatLanguageModel, new ObjectMapper());
+                contentRepository, indexRepository, chatModel, new ObjectMapper());
     }
 
     @Test
@@ -83,8 +82,10 @@ class PageIndexServiceTest {
                                 .build()
                 ));
 
-        when(chatLanguageModel.generate(any(), any(dev.langchain4j.data.message.UserMessage.class)))
-                .thenReturn(Response.from(AiMessage.from("Polymorphism allows objects to take many forms.")));
+        when(chatModel.chat(any(dev.langchain4j.data.message.SystemMessage.class), any(dev.langchain4j.data.message.UserMessage.class)))
+                .thenReturn(dev.langchain4j.model.chat.response.ChatResponse.builder()
+                        .aiMessage(AiMessage.from("Polymorphism allows objects to take many forms."))
+                        .build());
 
         ChatResponse response = pageIndexService.answer(COURSE_ID, "What is polymorphism?").block();
 

@@ -6,9 +6,10 @@ import com.coursechatbot.repository.CourseContentRepository;
 import com.coursechatbot.repository.CourseIndexRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import dev.langchain4j.model.chat.ChatLanguageModel;
+import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.model.chat.ChatModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -36,7 +37,7 @@ public class PageIndexService {
 
     private final CourseContentRepository contentRepository;
     private final CourseIndexRepository   indexRepository;
-    private final ChatLanguageModel       chatModel;
+    private final ChatModel chatModel;
     private final ObjectMapper            objectMapper;
 
     public Mono<ChatResponse> answer(String courseId, String question) {
@@ -86,10 +87,10 @@ public class PageIndexService {
                                 log.debug("Answer prompt: {} chars", prompt.length());
 
                                 return Mono.fromCallable(() ->
-                                        chatModel.generate(
+                                        chatModel.chat(
                                                 SystemMessage.from("You are a concise Java course assistant. Answer in 4-5 sentences maximum using ONLY the provided context."),
                                                 UserMessage.from(prompt)
-                                        ).content().text()
+                                        ).aiMessage().text()
                                 )
                                 .subscribeOn(Schedulers.boundedElastic())   // Ollama call is blocking
                                 .map(answer -> ChatResponse.builder()
