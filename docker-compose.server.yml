@@ -42,12 +42,12 @@ services:
       context: ./frontend
       args:
         # Public server IP — browser calls backend at this URL
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://100.114.88.111:8000}
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://hirevitae-chatbotapi.chakritech.org}
     container_name: coursechatbot-frontend
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://100.114.88.111:8000}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://hirevitae-chatbotapi.chakritech.org}
     depends_on:
       - backend
     restart: unless-stopped
