@@ -36,4 +36,13 @@ public class CourseIndex {
      */
     @Column("index_json")
     private String indexJson;
+
+    @Column("title")
+    private String title;
+
+    @Column("branch")
+    private String branch;
+
+    @Column("subject")
+    private String subject;
 }

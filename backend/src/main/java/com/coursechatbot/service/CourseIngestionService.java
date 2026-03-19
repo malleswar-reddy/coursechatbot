@@ -39,6 +39,19 @@ public class CourseIngestionService {
                 .collectList();
     }
 
+    public Mono<List<Map<String, Object>>> getAllCourses() {
+        return indexRepository.findAll()
+                .map(c -> {
+                    Map<String, Object> m = new java.util.LinkedHashMap<>();
+                    m.put("courseId",    c.getCourseId());
+                    m.put("branch",      c.getBranch());
+                    m.put("subject",     c.getSubject());
+                    m.put("title",       c.getTitle());
+                    return m;
+                })
+                .collectList();
+    }
+
     @Transactional
     public Mono<Integer> ingest(String courseId, String indexJson) {
         Map<String, Object> indexMap = parseJson(indexJson);

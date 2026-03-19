@@ -256,13 +256,20 @@ def cmd_add(args: argparse.Namespace) -> None:
     cur  = conn.cursor()
 
     index_no_pages = {k: v for k, v in index.items() if k != "pages"}
+    branch  = getattr(args, "branch",  None) or None
+    subject = getattr(args, "subject", None) or None
+    title   = index.get("title")
     cur.execute(
         """
-        INSERT INTO course_index (course_id, index_json)
-        VALUES (%s, %s)
-        ON CONFLICT (course_id) DO UPDATE SET index_json = EXCLUDED.index_json
+        INSERT INTO course_index (course_id, index_json, branch, subject, title)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (course_id) DO UPDATE
+            SET index_json = EXCLUDED.index_json,
+                branch     = COALESCE(EXCLUDED.branch, course_index.branch),
+                subject    = COALESCE(EXCLUDED.subject, course_index.subject),
+                title      = COALESCE(EXCLUDED.title, course_index.title)
         """,
-        (course_id, json.dumps(index_no_pages)),
+        (course_id, json.dumps(index_no_pages), branch, subject, title),
     )
 
     inserted = 0
@@ -287,6 +294,10 @@ def cmd_add(args: argparse.Namespace) -> None:
     print(f"   Title   : {index.get('title', 'N/A')}")
     print(f"   Pages   : {len(pages)}")
     print(f"   Chapters: {len(index.get('chapters', []))}")
+    if branch:
+        print(f"   Branch  : {branch}")
+    if subject:
+        print(f"   Subject : {subject}")
     print(f"\n   Query:  python3 course_manager.py query --course-id {course_id} --question \"...\"")
     print(f"{'═'*60}")
 
@@ -499,6 +510,10 @@ Examples
     p_add = sub.add_parser("add", help="Index a file and ingest into DB")
     p_add.add_argument("--input",      required=True, help=".pdf / .md / .txt file path")
     p_add.add_argument("--course-id",  required=True, help="Unique course identifier  (e.g. java-basics)")
+    p_add.add_argument("--branch",     default=None,
+                       help="Engineering branch  e.g. CSE | ECE | EEE | CIVIL | DA-AIML")
+    p_add.add_argument("--subject",    default=None,
+                       help="Subject name  e.g. 'Data Structures'")
     p_add.add_argument("--skip-pages", type=int, default=0,
                        help="Skip first N pages (PDF front matter). 0 = auto-detect.")
     p_add.add_argument("--ollama-url", default=DEFAULT_OLLAMA)

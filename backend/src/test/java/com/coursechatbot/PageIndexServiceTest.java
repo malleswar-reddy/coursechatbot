@@ -6,6 +6,8 @@ import com.coursechatbot.model.CourseIndex;
 import com.coursechatbot.repository.CourseContentRepository;
 import com.coursechatbot.repository.CourseIndexRepository;
 import com.coursechatbot.service.PageIndexService;
+import com.coursechatbot.service.PromptBuilderService;
+import com.coursechatbot.service.SessionService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.model.chat.ChatModel;
@@ -14,9 +16,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
+
+import java.util.List;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
@@ -27,11 +34,14 @@ import static org.mockito.Mockito.when;
  * All dependencies are mocked — no database or Spring context needed.
  */
 @ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.LENIENT)
 class PageIndexServiceTest {
 
     @Mock private CourseContentRepository contentRepository;
     @Mock private CourseIndexRepository   indexRepository;
     @Mock private ChatModel               chatModel;
+    @Mock private PromptBuilderService    promptBuilderService;
+    @Mock private SessionService          sessionService;
 
     private PageIndexService pageIndexService;
 
@@ -59,9 +69,18 @@ class PageIndexServiceTest {
 
     @BeforeEach
     void setUp() {
-        // Construct service manually so we can supply a real ObjectMapper
         pageIndexService = new PageIndexService(
-                contentRepository, indexRepository, chatModel, new ObjectMapper());
+                contentRepository, indexRepository, chatModel, new ObjectMapper(),
+                promptBuilderService, sessionService);
+
+        // Integrity guard: no violation by default
+        when(promptBuilderService.checkIntegrityViolation(anyString())).thenReturn(null);
+        // System prompt stub
+        when(promptBuilderService.buildSystemPrompt(anyString(), any(), anyString()))
+                .thenReturn("You are a helpful assistant.");
+        // Follow-up suggestions stub
+        when(promptBuilderService.buildFollowUpSuggestions(anyString(), anyString()))
+                .thenReturn(List.of("Tell me more", "Give an example"));
     }
 
     @Test

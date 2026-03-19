@@ -1,14 +1,15 @@
 package com.coursechatbot.service;
 
+import com.coursechatbot.dto.ChatRequest;
 import com.coursechatbot.dto.ChatResponse;
 import com.coursechatbot.model.CourseContent;
+import com.coursechatbot.model.CourseIndex;
 import com.coursechatbot.repository.CourseContentRepository;
 import com.coursechatbot.repository.CourseIndexRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import dev.langchain4j.model.chat.ChatModel;
-import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -16,44 +17,61 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-import java.util.*;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 /**
  * Core PageIndex RAG service — fully reactive with WebFlux + R2DBC.
  *
  * Flow:
- *   1. Load the course index from PostgreSQL (reactive).
- *   2. Keyword-score each chapter/section to pick the best page range (CPU, non-blocking).
- *   3. Fetch up to 2 pages of context from PostgreSQL (reactive).
- *   4. Single LLM call offloaded to boundedElastic scheduler (blocking I/O).
+ *   1. Academic integrity check (instant, no LLM call if violated).
+ *   2. Load the course index from PostgreSQL (reactive).
+ *   3. Keyword-score chapters/sections to pick the best page range.
+ *   4. Fetch up to 5 pages of context from PostgreSQL (reactive).
+ *   5. Single LLM call offloaded to boundedElastic scheduler (blocking I/O).
+ *   6. Record interaction in session (async, best-effort).
  */
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class PageIndexService {
 
-    private static final int MAX_CONTEXT_CHARS = 800;
-    private static final int MAX_PAGES         = 2;
+    private static final int MAX_CONTEXT_CHARS = 3000;
+    private static final int MAX_PAGES         = 5;
 
     private final CourseContentRepository contentRepository;
     private final CourseIndexRepository   indexRepository;
-    private final ChatModel chatModel;
+    private final ChatModel               chatModel;
     private final ObjectMapper            objectMapper;
+    private final PromptBuilderService    promptBuilderService;
+    private final SessionService          sessionService;
 
-    public Mono<ChatResponse> answer(String courseId, String question) {
+    public Mono<ChatResponse> answer(ChatRequest request) {
+        String courseId       = request.getCourseId();
+        String question       = request.getQuestion();
+        String mode           = request.getMode() != null ? request.getMode().toUpperCase() : "LEARN";
+        String difficulty     = request.getDifficultyLevel() != null ? request.getDifficultyLevel().toUpperCase() : "INTERMEDIATE";
+        String sessionIdStr   = request.getSessionId();
+
+        // ── Step 1: Academic integrity guard ─────────────────────────────────
+        String refusal = promptBuilderService.checkIntegrityViolation(question);
+        if (refusal != null) {
+            return buildRefusalResponse(courseId, mode, difficulty, sessionIdStr, question, refusal);
+        }
 
         return indexRepository.findById(courseId)
                 .switchIfEmpty(Mono.error(new IllegalArgumentException(
                         "No index found for course: " + courseId)))
                 .flatMap(courseIndex -> {
 
-                    // ── Step 2: Keyword-based page selection (CPU, instant) ───
+                    // ── Step 2: Keyword-based page selection ──────────────────
                     Map<String, Object> indexMap = parseJson(courseIndex.getIndexJson());
                     PageSelection selection = selectPagesByKeyword(indexMap, question);
                     log.info("Selected pages {}-{} for question='{}' reason='{}'",
                             selection.startPage(), selection.endPage(), question, selection.reason());
 
-                    // ── Step 3: Fetch pages reactively ───────────────────────
+                    // ── Step 3: Fetch pages reactively ────────────────────────
                     return contentRepository
                             .findPageRange(courseId, selection.startPage(), selection.endPage())
                             .collectList()
@@ -72,36 +90,94 @@ public class PageIndexService {
                             })
                             .flatMap(pages -> {
                                 if (pages.isEmpty()) {
-                                    return Mono.just(ChatResponse.builder()
-                                            .courseId(courseId)
-                                            .startPage(selection.startPage())
-                                            .endPage(selection.endPage())
-                                            .sectionReason(selection.reason())
-                                            .answer("I could not find course content for the selected page range.")
-                                            .build());
+                                    return Mono.just(buildResponse(courseId, mode, difficulty, sessionIdStr,
+                                            selection, "I could not find course content for the selected page range.", false));
                                 }
 
-                                // ── Step 4: LLM call — offload to boundedElastic (blocking I/O) ──
-                                String context = buildContext(pages, MAX_PAGES, MAX_CONTEXT_CHARS);
-                                String prompt  = buildAnswerPrompt(context, question);
-                                log.debug("Answer prompt: {} chars", prompt.length());
+                                // ── Step 4: LLM call — offload to boundedElastic ──
+                                String context    = buildContext(pages, MAX_PAGES, MAX_CONTEXT_CHARS);
+                                String prompt     = buildAnswerPrompt(context, question);
+                                String systemPmpt = promptBuilderService.buildSystemPrompt(
+                                        mode, courseIndex.getBranch(), difficulty);
+                                boolean isExam    = "EXAM".equals(mode);
+
+                                log.debug("Answer prompt: {} chars | mode={} difficulty={}", prompt.length(), mode, difficulty);
 
                                 return Mono.fromCallable(() ->
                                         chatModel.chat(
-                                                SystemMessage.from("You are a concise Java course assistant. Answer in 4-5 sentences maximum using ONLY the provided context."),
+                                                SystemMessage.from(systemPmpt),
                                                 UserMessage.from(prompt)
                                         ).aiMessage().text()
                                 )
-                                .subscribeOn(Schedulers.boundedElastic())   // Ollama call is blocking
-                                .map(answer -> ChatResponse.builder()
-                                        .courseId(courseId)
-                                        .startPage(selection.startPage())
-                                        .endPage(selection.endPage())
-                                        .sectionReason(selection.reason())
-                                        .answer(answer.strip())
-                                        .build());
+                                .subscribeOn(Schedulers.boundedElastic())
+                                .flatMap(answer -> {
+                                    ChatResponse resp = buildResponse(
+                                            courseId, mode, difficulty, sessionIdStr,
+                                            selection, answer.strip(), isExam);
+
+                                    // ── Step 5: Record interaction (async) ────
+                                    if (sessionIdStr != null) {
+                                        String responseType = isExam ? "HINT" : "EXPLAINED";
+                                        String conceptTag   = selection.reason();
+                                        return sessionService.recordInteraction(
+                                                UUID.fromString(sessionIdStr), question, responseType, conceptTag)
+                                                .then(sessionService.isPomodoroThresholdReached(UUID.fromString(sessionIdStr)))
+                                                .map(pomodoro -> {
+                                                    resp.setPomodoroReminder(pomodoro);
+                                                    return resp;
+                                                })
+                                                .onErrorResume(e -> {
+                                                    log.warn("Session record failed (non-fatal): {}", e.getMessage());
+                                                    return Mono.just(resp);
+                                                });
+                                    }
+                                    return Mono.just(resp);
+                                });
                             });
                 });
+    }
+
+    // ── Backward-compatible overload (legacy callers) ─────────────────────────
+    public Mono<ChatResponse> answer(String courseId, String question) {
+        com.coursechatbot.dto.ChatRequest req = new com.coursechatbot.dto.ChatRequest();
+        req.setCourseId(courseId);
+        req.setQuestion(question);
+        return answer(req);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private ChatResponse buildResponse(String courseId, String mode, String difficulty,
+                                       String sessionId, PageSelection sel, String answer, boolean isHintOnly) {
+        List<String> suggestions = promptBuilderService.buildFollowUpSuggestions(answer, mode);
+        return ChatResponse.builder()
+                .courseId(courseId)
+                .mode(mode)
+                .difficultyLevel(difficulty)
+                .sessionId(sessionId)
+                .startPage(sel.startPage())
+                .endPage(sel.endPage())
+                .sectionReason(sel.reason())
+                .answer(answer)
+                .isHintOnly(isHintOnly)
+                .followUpSuggestions(suggestions)
+                .build();
+    }
+
+    private Mono<ChatResponse> buildRefusalResponse(String courseId, String mode, String difficulty,
+                                                     String sessionId, String question, String refusal) {
+        if (sessionId != null) {
+            return sessionService.recordInteraction(UUID.fromString(sessionId), question, "REFUSED", null)
+                    .onErrorResume(e -> Mono.empty())
+                    .thenReturn(ChatResponse.builder()
+                            .courseId(courseId).mode(mode).difficultyLevel(difficulty)
+                            .sessionId(sessionId).answer(refusal).isHintOnly(false)
+                            .followUpSuggestions(List.of()).build());
+        }
+        return Mono.just(ChatResponse.builder()
+                .courseId(courseId).mode(mode).difficultyLevel(difficulty)
+                .sessionId(sessionId).answer(refusal).isHintOnly(false)
+                .followUpSuggestions(List.of()).build());
     }
 
     // ── Keyword-based page selector ───────────────────────────────────────────
@@ -118,12 +194,11 @@ public class PageIndexService {
         String   q     = question.toLowerCase();
         String[] words = q.split("\\s+");
 
-        int bestScore              = -1;
+        int bestScore = -1;
         Map<String, Object> bestTarget = chapters.get(0);
 
         for (Map<String, Object> ch : chapters) {
             int score = scoreTarget(ch, words);
-
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> children =
                     (List<Map<String, Object>>) ch.getOrDefault("children", List.of());
@@ -152,8 +227,6 @@ public class PageIndexService {
         return score;
     }
 
-    // ── Prompt builder ────────────────────────────────────────────────────────
-
     private String buildAnswerPrompt(String context, String question) {
         return """
                 Context:
@@ -161,11 +234,10 @@ public class PageIndexService {
 
                 Question: %s
 
-                Answer concisely in 4-5 sentences using ONLY the context above.
+                Answer using ONLY the context above.
                 Answer:""".formatted(context, question);
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private String buildContext(List<CourseContent> pages, int maxPages, int maxChars) {
         StringBuilder sb    = new StringBuilder();

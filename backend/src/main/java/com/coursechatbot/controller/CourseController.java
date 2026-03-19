@@ -13,9 +13,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * REST API for ingesting course PageIndex data.
+ * REST API for course ingestion and listing.
  *
- * POST /api/courses  — Ingest a PageIndex JSON (from build_index.py) into the database.
+ * POST /api/courses             — Ingest a PageIndex JSON
+ * GET  /api/courses/courseIds   — Return all course IDs (legacy)
+ * GET  /api/courses             — Return full course metadata (branch/subject) for grouped UI
  */
 @RestController
 @RequestMapping("/api/courses")
@@ -46,8 +48,15 @@ public class CourseController {
                 )));
     }
 
+    /** Legacy — returns just a flat list of course IDs. */
     @GetMapping("/courseIds")
     public Mono<List<String>> getAllCourseIds() {
         return ingestionService.getAllCourseIds();
+    }
+
+    /** Returns all courses with branch/subject metadata for the grouped UI dropdown. */
+    @GetMapping
+    public Mono<List<Map<String, Object>>> getAllCourses() {
+        return ingestionService.getAllCourses();
     }
 }

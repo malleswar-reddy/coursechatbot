@@ -12,4 +12,13 @@ public class ChatRequest {
 
     @NotBlank(message = "question must not be blank")
     private String question;
+
+    /** "LEARN" or "EXAM" — defaults to LEARN if null */
+    private String mode;
+
+    /** "BEGINNER", "INTERMEDIATE", or "ADVANCED" — defaults to INTERMEDIATE if null */
+    private String difficultyLevel;
+
+    /** nullable — UUID string of the current session */
+    private String sessionId;
 }
