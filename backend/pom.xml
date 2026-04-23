@@ -29,19 +29,7 @@
       <artifactId>spring-boot-starter-webflux</artifactId>
     </dependency>
 
-    <!-- Reactive R2DBC data access (replaces spring-boot-starter-data-jpa) -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-data-r2dbc</artifactId>
-    </dependency>
-
-    <!-- R2DBC PostgreSQL driver (reactive) — sessions only -->
-    <dependency>
-      <groupId>org.postgresql</groupId>
-      <artifactId>r2dbc-postgresql</artifactId>
-    </dependency>
-
-    <!-- Flyway removed — using ChromaDB for course content, no schema migrations needed -->
+    <!-- Reactive R2DBC removed — no PostgreSQL needed, using ChromaDB only -->
 
     <dependency>
       <groupId>org.springframework.boot</groupId>

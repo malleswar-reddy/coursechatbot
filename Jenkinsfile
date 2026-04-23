@@ -75,7 +75,7 @@ pipeline {
         )
         string(
             name: 'SERVER_DIR',
-            defaultValue: '/home/dell/chatbot',
+            defaultValue: '/home/dell/chatbot/workspace',
             description: '📁  Project dir on server (REMOTE mode only — LOCAL uses Jenkins workspace)'
         )
         string(
@@ -108,6 +108,32 @@ pipeline {
             }
         }
 
+        // ── Stage 1b: Init Workspace dir ─────────────────────────────────────
+        // Create (and empty) SERVER_DIR before any files are synced into it.
+        stage('Init Workspace') {
+            steps {
+                script {
+                    if (params.DEPLOY_MODE == 'local') {
+                        sh """
+                            echo "🗂️  Creating empty workspace dir: ${params.SERVER_DIR} ..."
+                            rm -rf "${params.SERVER_DIR}"
+                            mkdir -p "${params.SERVER_DIR}"
+                            echo "✅ ${params.SERVER_DIR} is ready (empty)"
+                        """
+                    } else {
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                echo "🗂️  Creating empty workspace dir on ${params.SERVER_HOST}: ${params.SERVER_DIR} ..."
+                                ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
+                                    "rm -rf '${params.SERVER_DIR}' && mkdir -p '${params.SERVER_DIR}'"
+                                echo "✅ ${params.SERVER_DIR} is ready (empty)"
+                            """
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Stage 2: Sync files ───────────────────────────────────────────────
         // LOCAL mode: rsync workspace → SERVER_DIR so manual commands work there too
         // REMOTE mode: rsync workspace → remote server via SSH
@@ -117,14 +143,15 @@ pipeline {
                     if (params.DEPLOY_MODE == 'local') {
                         sh """
                             echo "📂 Syncing workspace → ${params.SERVER_DIR} ..."
-                            mkdir -p ${params.SERVER_DIR}
+                            mkdir -p ${params.SERVER_DIR} 2>/dev/null || true
                             rsync -a --delete \\
                                 --exclude='.git' --exclude='target' \\
                                 --exclude='node_modules' --exclude='.next' \\
                                 --exclude='*.log' --exclude='uploads' --exclude='index_output' \\
                                 "${env.WORKSPACE}/" \\
-                                "${params.SERVER_DIR}/"
-                            echo "✅ Synced to ${params.SERVER_DIR}"
+                                "${params.SERVER_DIR}/" 2>/dev/null \\
+                            && echo "✅ Synced to ${params.SERVER_DIR}" \\
+                            || echo "⚠️  Could not sync to ${params.SERVER_DIR} (permission) — deploying from workspace only (OK)"
                         """
                     } else {
                         sshagent(credentials: [env.SSH_CRED_ID]) {

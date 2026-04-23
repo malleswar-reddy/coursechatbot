@@ -1,23 +1,26 @@
 package com.coursechatbot.controller;
 
-import com.coursechatbot.dto.IngestRequest;
-import com.coursechatbot.service.CourseIngestionService;
-import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
 
 /**
- * REST API for course ingestion and listing.
- *
- * POST /api/courses             — Ingest a PageIndex JSON
- * GET  /api/courses/courseIds   — Return all course IDs (legacy)
- * GET  /api/courses             — Return full course metadata (branch/subject) for grouped UI
+ * Course API — lists courses from ChromaDB collections.
+ * POST /api/courses is removed (ingestion is via ingest_to_chroma.py script).
+ * GET  /api/courses/courseIds — returns collection names from ChromaDB.
+ * GET  /api/courses           — returns course metadata.
  */
 @RestController
 @RequestMapping("/api/courses")
@@ -26,37 +29,51 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class CourseController {
 
-    private final CourseIngestionService ingestionService;
+    private final WebClient.Builder webClientBuilder;
+
+    @Value("${chroma.base-url:http://localhost:8001}")
+    private String chromaBaseUrl;
+
+    private static final String CHROMA_V2 =
+            "/api/v2/tenants/default_tenant/databases/default_database";
 
     /**
-     * Ingest a course's PageIndex JSON.
-     *
-     * Request body:
-     * {
-     *   "courseId": "course1",
-     *   "indexJson": "{ ...output of build_index.py... }"
-     * }
+     * Returns all course IDs (ChromaDB collection names).
      */
-    @PostMapping
-    public Mono<ResponseEntity<Map<String, Object>>> ingest(@Valid @RequestBody IngestRequest request) {
-        log.info("Ingest request for courseId={}", request.getCourseId());
-        return ingestionService.ingest(request.getCourseId(), request.getIndexJson())
-                .map(pagesIngested -> ResponseEntity.ok(Map.<String, Object>of(
-                        "courseId",      request.getCourseId(),
-                        "pagesIngested", pagesIngested,
-                        "status",        "ok"
-                )));
-    }
-
-    /** Legacy — returns just a flat list of course IDs. */
     @GetMapping("/courseIds")
+    @SuppressWarnings("unchecked")
     public Mono<List<String>> getAllCourseIds() {
-        return ingestionService.getAllCourseIds();
+        return webClientBuilder.clone().baseUrl(chromaBaseUrl).build()
+                .get()
+                .uri(CHROMA_V2 + "/collections")
+                .retrieve()
+                .bodyToMono(List.class)
+                .map(cols -> cols.stream()
+                        .map(c -> (String) ((Map<?, ?>) c).get("name"))
+                        .toList())
+                .onErrorReturn(List.of());
     }
 
-    /** Returns all courses with branch/subject metadata for the grouped UI dropdown. */
+    /** Returns courses with metadata for UI. */
     @GetMapping
     public Mono<List<Map<String, Object>>> getAllCourses() {
-        return ingestionService.getAllCourses();
+        return getAllCourseIds()
+                .map(ids -> ids.stream()
+                        .map(id -> Map.<String, Object>of(
+                                "courseId", id,
+                                "branch", "General",
+                                "subject", id))
+                        .toList());
+    }
+
+    /**
+     * Ingest via script — this endpoint returns guidance.
+     */
+    @PostMapping
+    public Mono<ResponseEntity<Map<String, Object>>> ingest(@RequestBody Map<String, Object> body) {
+        return Mono.just(ResponseEntity.ok(Map.of(
+                "status", "info",
+                "message", "Use pageindex/ingest_to_chroma.py to ingest course PDFs into ChromaDB"
+        )));
     }
 }
