@@ -58,6 +58,11 @@ pipeline {
             defaultValue: false,
             description: '⚠️  DROP and recreate the PostgreSQL volume — ALL DATA WILL BE LOST'
         )
+        booleanParam(
+            name: 'SKIP_DB_MIGRATE',
+            defaultValue: true,
+            description: '⏩  Skip Flyway DB migration (set true when PostgreSQL is not used)'
+        )
         string(
             name: 'OLLAMA_MODEL',
             defaultValue: 'gemma3:4b',
@@ -149,8 +154,11 @@ pipeline {
             }
         }
 
-        // ── Stage 4: DB Migrate (Flyway) ─────────────────────────────────────
+        // ── Stage 4: DB Migrate (Flyway) — skipped when SKIP_DB_MIGRATE=true ──
         stage('DB Migrate') {
+            when {
+                expression { !params.SKIP_DB_MIGRATE }
+            }
             steps {
                 script {
                     def migrationDir = "${env.DEPLOY_DIR}/backend/src/main/resources/db/migration"

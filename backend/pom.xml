@@ -35,33 +35,13 @@
       <artifactId>spring-boot-starter-data-r2dbc</artifactId>
     </dependency>
 
-    <!-- R2DBC PostgreSQL driver (reactive) —
-        managed by Spring Boot 4.x BOM as org.postgresql:r2dbc-postgresql -->
+    <!-- R2DBC PostgreSQL driver (reactive) — sessions only -->
     <dependency>
       <groupId>org.postgresql</groupId>
       <artifactId>r2dbc-postgresql</artifactId>
     </dependency>
 
-    <!-- JDBC + PostgreSQL JDBC driver — kept only for Flyway migrations -->
-    <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-jdbc</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.postgresql</groupId>
-      <artifactId>postgresql</artifactId>
-      <scope>runtime</scope>
-    </dependency>
-
-    <!-- Flyway for DB migrations (runs over JDBC before app starts) -->
-    <dependency>
-      <groupId>org.flywaydb</groupId>
-      <artifactId>flyway-core</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>org.flywaydb</groupId>
-      <artifactId>flyway-database-postgresql</artifactId>
-    </dependency>
+    <!-- Flyway removed — using ChromaDB for course content, no schema migrations needed -->
 
     <dependency>
       <groupId>org.springframework.boot</groupId>
