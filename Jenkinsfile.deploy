@@ -22,7 +22,7 @@ pipeline {
         )
         choice(
             name: 'SERVICE',
-            choices: ['all', 'backend', 'frontend', 'postgres', 'ollama', 'open-webui'],
+            choices: ['all', 'backend', 'frontend', 'postgres', 'ollama', 'chromadb'],
             description: '🔄  Which service(s) to restart'
         )
         booleanParam(
@@ -109,7 +109,7 @@ pipeline {
             ✅ Restart complete
             Backend   : http://${params.SERVER_HOST}:8000
             Frontend  : http://${params.SERVER_HOST}:3000
-            Open WebUI: http://${params.SERVER_HOST}:3001
+            ChromaDB  : http://${params.SERVER_HOST}:8001
             """
         }
         failure {

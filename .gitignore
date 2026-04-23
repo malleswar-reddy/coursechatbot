@@ -21,3 +21,4 @@ pageindex/*.pyo
 *.iml
 .vscode/
 .github/
+.venv

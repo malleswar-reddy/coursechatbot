@@ -3,7 +3,7 @@ package com.coursechatbot.controller;
 import com.coursechatbot.dto.ChatRequest;
 import com.coursechatbot.dto.ChatResponse;
 import com.coursechatbot.dto.PerformanceSummaryResponse;
-import com.coursechatbot.service.PageIndexService;
+import com.coursechatbot.service.VectorRagService;
 import com.coursechatbot.service.SessionService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -16,7 +16,7 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * REST API for the PageIndex-powered ExamPrep AI chatbot.
+ * REST API for the Vector RAG (ChromaDB) Course Chatbot.
  *
  * POST /api/chat                         — Ask a question (LEARN or EXAM mode)
  * POST /api/chat/session                 — Create a new session
@@ -29,15 +29,15 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ChatController {
 
-    private final PageIndexService pageIndexService;
+    private final VectorRagService vectorRagService;
     private final SessionService   sessionService;
 
-    /** Answer a student question using the PageIndex RAG flow. */
+    /** Answer a student question using ChromaDB Vector RAG flow. */
     @PostMapping
     public Mono<ResponseEntity<ChatResponse>> chat(@Valid @RequestBody ChatRequest request) {
         log.info("Chat request: courseId={}, mode={}, difficulty={}, question={}",
                 request.getCourseId(), request.getMode(), request.getDifficultyLevel(), request.getQuestion());
-        return pageIndexService.answer(request).map(ResponseEntity::ok);
+        return vectorRagService.answer(request).map(ResponseEntity::ok);
     }
 
     /**

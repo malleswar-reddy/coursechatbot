@@ -60,7 +60,7 @@ pipeline {
         )
         string(
             name: 'OLLAMA_MODEL',
-            defaultValue: 'qwen2.5:0.5b',
+            defaultValue: 'gemma3:4b',
             description: '🤖  Ollama model to use'
         )
         string(
@@ -280,7 +280,7 @@ REMOTE
             Backend   (tunnel) : ${params.NEXT_PUBLIC_API_URL}
             Backend   (direct) : http://${params.SERVER_HOST}:8000
             Frontend  (direct) : http://${params.SERVER_HOST}:3000
-            Open WebUI         : http://${params.SERVER_HOST}:3001
+            ChromaDB           : http://${params.SERVER_HOST}:8001
             ============================================================
             """
         }

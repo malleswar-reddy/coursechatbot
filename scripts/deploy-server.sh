@@ -11,7 +11,7 @@ COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.server.yml}"
 BUILD_BACKEND="${BUILD_BACKEND:-true}"
 BUILD_FRONTEND="${BUILD_FRONTEND:-true}"
 RESET_DB="${RESET_DB:-false}"
-OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:0.5b}"
+OLLAMA_MODEL="${OLLAMA_MODEL:-gemma4:latest}"
 NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-https://hirevitae-chatbotapi.chakritech.org}"
 
 cd "$SERVER_DIR"
@@ -73,11 +73,30 @@ echo "  ✅ PostgreSQL is healthy."
 echo ""
 echo "[2/5] 🤖  Ollama..."
 
+# Always pull latest Ollama image to ensure model compatibility
+echo "  Pulling latest Ollama image..."
+docker pull ollama/ollama:latest
+
 if container_running "coursechatbot-ollama"; then
-    echo "  ℹ️  Ollama already running — skipping start"
+    echo "  ℹ️  Ollama already running — recreating with latest image..."
+    docker stop coursechatbot-ollama 2>/dev/null || true
+    docker rm   coursechatbot-ollama 2>/dev/null || true
+fi
+
+echo "  Starting Ollama..."
+docker compose -f "$COMPOSE_FILE" up -d ollama
+
+echo "  ⏳ Waiting for Ollama to be ready..."
+sleep 5
+
+# Pull the required model if not already present
+echo "  Checking model: $OLLAMA_MODEL ..."
+if ! docker exec coursechatbot-ollama ollama list | grep -q "${OLLAMA_MODEL%%:*}"; then
+    echo "  📥 Pulling model $OLLAMA_MODEL (this may take a while — 9.6GB for gemma4)..."
+    docker exec coursechatbot-ollama ollama pull "$OLLAMA_MODEL"
+    echo "  ✅ Model $OLLAMA_MODEL pulled."
 else
-    echo "  Starting Ollama..."
-    docker compose -f "$COMPOSE_FILE" up -d ollama
+    echo "  ✅ Model $OLLAMA_MODEL already present."
 fi
 echo "  ✅ Ollama is up."
 
@@ -172,7 +191,7 @@ echo "  Backend   (tunnel) : https://hirevitae-chatbotapi.chakritech.org"
 echo "  Backend   (direct) : http://100.114.88.111:8000"
 echo "  Frontend  (direct) : http://100.114.88.111:3000"
 echo "  Open WebUI         : http://100.114.88.111:3001"
-echo "  Ollama             : http://100.114.88.111:11434"
+echo "  Ollama             : http://100.114.88.111:11434  (model: $OLLAMA_MODEL)"
 echo "  DB host            : 100.114.88.111:5432"
 echo "============================================================"
 

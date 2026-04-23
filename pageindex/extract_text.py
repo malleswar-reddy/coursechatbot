@@ -3,7 +3,8 @@ extract_text.py — Multi-format text extractor for PageIndex.
 
 Supported formats
 -----------------
-  .pdf          → pdfplumber  (one "page" = one PDF page)
+  .pdf          → pdfplumber  (text layer)
+                  → PyMuPDF + pytesseract OCR  (auto-fallback for scanned PDFs)
   .md / .markdown → split by headings (one "page" = one ## section)
   .txt / .text    → split into 500-word chunks (one "page" = one chunk)
   anything else   → treated as plain text
@@ -20,10 +21,23 @@ from pathlib import Path
 WORDS_PER_CHUNK = 500   # for .txt chunk size
 
 
-# ── PDF ───────────────────────────────────────────────────────────────────────
+# ── PDF helpers ───────────────────────────────────────────────────────────────
 
-def extract_pdf(path: Path) -> dict[int, str]:
-    """Extract text page-by-page from a PDF using pdfplumber."""
+def _has_text_layer(pdf_path: Path, sample_pages: int = 5) -> bool:
+    """Return True if at least one of the first N pages has extractable text."""
+    try:
+        import pdfplumber
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages[:sample_pages]:
+                if (page.extract_text() or "").strip():
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def _extract_pdf_text_layer(path: Path) -> dict[int, str]:
+    """Extract text page-by-page using pdfplumber (for PDFs with a text layer)."""
     try:
         import pdfplumber
     except ImportError:
@@ -39,6 +53,59 @@ def extract_pdf(path: Path) -> dict[int, str]:
             if i % 20 == 0 or i == total:
                 print(f"    Extracted {i}/{total} pages …", flush=True)
     return pages
+
+
+def _extract_pdf_ocr(path: Path) -> dict[int, str]:
+    """
+    OCR fallback for scanned / image-only PDFs.
+    Uses PyMuPDF to render each page as a high-res image,
+    then pytesseract to extract text.
+    """
+    try:
+        import fitz          # PyMuPDF
+    except ImportError:
+        sys.exit("❌  pymupdf not installed — run: pip3 install pymupdf")
+    try:
+        import pytesseract
+        from PIL import Image
+        import io
+    except ImportError:
+        sys.exit("❌  pytesseract / pillow not installed — run: pip3 install pytesseract pillow")
+
+    pages: dict[int, str] = {}
+    doc = fitz.open(str(path))
+    total = len(doc)
+    print(f"    PDF (scanned): {total} pages — running OCR …", flush=True)
+
+    for i, page in enumerate(doc, start=1):
+        # Render at 300 DPI for best OCR accuracy
+        mat  = fitz.Matrix(300 / 72, 300 / 72)
+        pix  = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+        img  = Image.open(io.BytesIO(pix.tobytes("png")))
+        text = pytesseract.image_to_string(img, lang="eng",
+                                           config="--psm 6 --oem 3")
+        pages[i] = text.strip()
+        if i % 5 == 0 or i == total:
+            print(f"    OCR {i}/{total} pages …", flush=True)
+
+    doc.close()
+    return pages
+
+
+def extract_pdf(path: Path) -> dict[int, str]:
+    """
+    Smart PDF extractor:
+      1. Try pdfplumber (text layer).
+      2. If pages are blank → auto-fallback to OCR.
+    """
+    print(f"📄  Extracting: {path.name}  [PDF]", flush=True)
+
+    if _has_text_layer(path):
+        print("    ✓ Text layer detected — using pdfplumber", flush=True)
+        return _extract_pdf_text_layer(path)
+    else:
+        print("    ⚠  No text layer — switching to OCR (PyMuPDF + Tesseract)", flush=True)
+        return _extract_pdf_ocr(path)
 
 
 # ── Markdown ──────────────────────────────────────────────────────────────────

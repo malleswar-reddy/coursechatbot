@@ -171,14 +171,55 @@ CREATE TABLE IF NOT EXISTS exam_performance (
 ### New flags for `add` sub-command
 ```bash
 python3 course_manager.py add \
-  --input       Doc/CSE\ PQB\ 1.pdf \
+  --input       "../.github/Doc/CSE PQB 1.pdf" \
   --course-id   cse-pqb-1 \
   --branch      CSE \
-  --subject     "Previous Question Bank" \
-  --ollama-url  http://localhost:11434
+  --subject     "Previous Question Bank"
 ```
+> `--db-url` and `--ollama-url` default to `100.114.88.111` — no need to pass them explicitly.
 
 `--branch` and `--subject` are stored in the `branch` and `subject` columns of `course_index` via `ON CONFLICT DO UPDATE`.
+
+### New flags for `query` sub-command
+
+| Flag | Values | Default | Description |
+|---|---|---|---|
+| `--mode` | `LEARN` \| `EXAM` | `LEARN` | LEARN = full structured answer; EXAM = hint only |
+| `--difficulty` | `BEGINNER` \| `INTERMEDIATE` \| `ADVANCED` | `INTERMEDIATE` | Controls depth and vocabulary of answer |
+
+#### LEARN mode — structured answer
+```bash
+python3 course_manager.py query \
+  --course-id  cse-pqb-1 \
+  --question   "What is OS scheduling?" \
+  --mode       LEARN \
+  --difficulty INTERMEDIATE
+```
+Output format:
+```
+Great question!
+
+### Concept
+...
+
+### Formula / Rule
+...
+
+### Example
+...
+
+### Application
+...
+```
+
+#### EXAM mode — hint only
+```bash
+python3 course_manager.py query \
+  --course-id  cse-pqb-1 \
+  --question   "What is OS scheduling?" \
+  --mode       EXAM
+```
+Output: 2-3 sentence guiding hint, no full answer.
 
 ---
 

@@ -54,9 +54,10 @@ from extract_text import extract_text
 COURSES_DIR = Path(__file__).parent / "courses"
 COURSES_DIR.mkdir(exist_ok=True)
 
-DEFAULT_DB_URL = "postgresql://chatbot:chatbot_secret@localhost:5432/coursechatbot"
-DEFAULT_OLLAMA  = "http://localhost:11434"
-DEFAULT_MODEL   = "qwen2.5:0.5b"
+REMOTE_HOST    = "100.114.88.111"
+DEFAULT_DB_URL = f"postgresql://chatbot:chatbot_secret@{REMOTE_HOST}:5432/coursechatbot"
+DEFAULT_OLLAMA = f"http://{REMOTE_HOST}:11434"
+DEFAULT_MODEL  = "qwen2.5:0.5b"
 
 # Front-matter keywords (for PDF auto-skip)
 _FRONT_MATTER = {"contents", "preface", "index", "copyright", "edition",
@@ -133,6 +134,69 @@ def extract_json_from(text: str) -> dict:
 #  ADD — index a file and ingest into DB
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _is_toc_valid(index: dict, total_pages: int) -> bool:
+    """
+    Return True only if the LLM-built TOC looks believable:
+      - At least 1 chapter
+      - At least 50% of chapters have page ranges that stay within [1, total_pages]
+    """
+    chapters = index.get("chapters", [])
+    if not chapters:
+        return False
+    valid = sum(
+        1 for ch in chapters
+        if 1 <= ch.get("start_page", 0) <= total_pages
+        and ch.get("start_page", 0) <= ch.get("end_page", 0) <= total_pages
+    )
+    return valid >= max(1, len(chapters) // 2)
+
+
+def _sanitize_toc(index: dict, total_pages: int) -> dict:
+    """
+    Flatten and validate an LLM-generated TOC:
+    - Max 2 levels deep (chapters → children only)
+    - Clamp page numbers to [1, total_pages]
+    - Remove children that duplicate parent ranges
+    """
+    def clamp(v: int) -> int:
+        return max(1, min(v, total_pages))
+
+    clean_chapters = []
+    for ch in index.get("chapters", []):
+        ch_start = clamp(int(ch.get("start_page", 1)))
+        ch_end   = clamp(int(ch.get("end_page",   ch_start + 1)))
+        if ch_start > ch_end:
+            ch_end = ch_start
+
+        children = []
+        for sub in ch.get("children", [])[:8]:   # max 8 subsections
+            s_start = clamp(int(sub.get("start_page", ch_start)))
+            s_end   = clamp(int(sub.get("end_page",   s_start + 1)))
+            if s_start > s_end:
+                s_end = s_start
+            # skip trivial 1-page duplicates that repeat the parent
+            if s_start == ch_start and s_end == ch_end:
+                continue
+            children.append({
+                "title":      str(sub.get("title",   "Section"))[:80],
+                "summary":    str(sub.get("summary", ""))[:200],
+                "start_page": s_start,
+                "end_page":   s_end,
+                "children":   [],   # no deeper nesting
+            })
+
+        clean_chapters.append({
+            "title":      str(ch.get("title",   "Chapter"))[:80],
+            "summary":    str(ch.get("summary", ""))[:200],
+            "start_page": ch_start,
+            "end_page":   ch_end,
+            "children":   children,
+        })
+
+    index["chapters"] = clean_chapters
+    return index
+
+
 def _build_toc_prompt(pages: dict[int, str], skip: int, source_ext: str) -> str:
     total = len(pages)
     content = {n: t for n, t in pages.items()
@@ -146,54 +210,82 @@ def _build_toc_prompt(pages: dict[int, str], skip: int, source_ext: str) -> str:
         f"[Page {num}]\n{text[:300]}" for num, text in sample.items()
     )
     unit = "pages" if source_ext == ".pdf" else "sections"
-    return f"""You are a document analyst. Analyze the sample below from a {total}-{unit} document and return a JSON table-of-contents.
+    return f"""You are a document analyst. Return a JSON table-of-contents for this {total}-{unit} document.
 
-Rules:
-- Return ONLY valid JSON. No explanation.
-- Spread chapter ranges across all {total} {unit}.
-- JSON format:
+STRICT RULES:
+- Return ONLY valid JSON. No explanation, no markdown, no extra text.
+- Maximum 2 levels deep: chapters with optional children. NO deeper nesting.
+- Each chapter must have unique start_page and end_page that cover the full document.
+- Do NOT repeat the same page range in children that is already in the parent.
+- children array must be EMPTY [] if there are no meaningful subsections.
+
+JSON format (EXACTLY this structure, no deeper nesting allowed):
 {{
   "title": "document title",
   "chapters": [
     {{
       "title": "Chapter title",
-      "summary": "one sentence",
+      "summary": "one sentence description",
       "start_page": {first},
       "end_page": {total},
-      "children": [
-        {{"title": "Sub section", "summary": "one sentence", "start_page": {first}, "end_page": {first+5}}}
-      ]
+      "children": []
     }}
   ]
 }}
 
-Sample ({len(sample)} {unit} shown):
+Sample content ({len(sample)} {unit} shown):
 {pages_text}
 
-JSON:"""
+JSON (2 levels max, no deep nesting):"""
 
 
 def _fallback_index(pages: dict[int, str], skip: int) -> dict:
-    total = len(pages)
+    """
+    Smart fallback TOC when LLM fails.
+    - Uses chunk_size=3 for PDFs ≤30 pages (PQBs / short docs)
+    - Uses chunk_size=10 for larger documents
+    - Names each chapter from the first meaningful line of OCR text
+    """
+    total      = len(pages)
+    chunk_size = 3 if total <= 30 else 10
+
+    # Pick document title from first non-empty page
     doc_title = "Unknown Course"
     for p in sorted(pages.keys()):
         lines = [l.strip() for l in pages[p].splitlines() if l.strip()]
         if lines:
             doc_title = lines[0][:80]
             break
-    chunk_size = 10
+
     start = max(1, skip + 1)
     chapters = []
     for cs in range(start, total + 1, chunk_size):
         end = min(cs + chunk_size - 1, total)
-        first_text = pages.get(cs, "")
-        first_line = next((l.strip() for l in first_text.splitlines() if l.strip()),
-                          f"Pages {cs}-{end}")
+
+        # Extract a meaningful title from the first non-empty page in this chunk
+        chunk_title = f"Pages {cs}–{end}"
+        for pg in range(cs, end + 1):
+            txt = pages.get(pg, "").strip()
+            if txt:
+                first_line = next((l.strip() for l in txt.splitlines() if len(l.strip()) > 5),
+                                  chunk_title)
+                chunk_title = first_line[:80]
+                break
+
+        # Build summary from first 200 chars across the chunk
+        chunk_text = " ".join(
+            pages.get(pg, "")[:200] for pg in range(cs, end + 1) if pages.get(pg, "").strip()
+        )
+        summary = chunk_text[:120].replace("\n", " ").strip() or f"Content covering pages {cs}–{end}"
+
         chapters.append({
-            "title": first_line[:80],
-            "summary": f"Content covering pages {cs} to {end}",
-            "start_page": cs, "end_page": end, "children": []
+            "title":      chunk_title,
+            "summary":    summary,
+            "start_page": cs,
+            "end_page":   end,
+            "children":   [],
         })
+
     return {"title": doc_title, "chapters": chapters}
 
 
@@ -231,7 +323,12 @@ def cmd_add(args: argparse.Namespace) -> None:
     try:
         raw = call_ollama_stream(prompt, args.ollama_url, args.model, num_predict=2048)
         index = extract_json_from(raw)
-        print("  ✓ LLM TOC built\n")
+        index = _sanitize_toc(index, len(pages))   # flatten deep/recursive nesting
+        if _is_toc_valid(index, len(pages)):
+            print("  ✓ LLM TOC built\n")
+        else:
+            print("  ⚠  LLM TOC has invalid page ranges → using fallback chunk index\n")
+            index = _fallback_index(pages, skip)
     except Exception as e:
         print(f"  ⚠  LLM failed ({e}) → using fallback chunk index\n")
         index = _fallback_index(pages, skip)
@@ -337,8 +434,8 @@ def _select_section(index: dict, question: str) -> tuple[int, int, str]:
     return best_start, best_end, best_title
 
 
-def _get_context(index: dict, start: int, end: int, max_pages: int = 3,
-                 max_chars: int = 1200) -> str:
+def _get_context(index: dict, start: int, end: int,
+                 max_pages: int = 5, max_chars: int = 3000) -> str:
     pages = index.get("pages", {})
     parts: list[str] = []
     total_chars = 0
@@ -353,15 +450,75 @@ def _get_context(index: dict, start: int, end: int, max_pages: int = 3,
     return "\n\n".join(parts)
 
 
+def _build_query_prompt(context: str, question: str, title: str,
+                        start: int, end: int, source_fmt: str,
+                        mode: str, difficulty: str) -> tuple[str, str]:
+    """Return (system_prompt, user_prompt) for the given mode + difficulty."""
+    unit = "page" if source_fmt == ".pdf" else "section"
+
+    # ── Depth guide based on difficulty ───────────────────────────────────────
+    depth = {
+        "BEGINNER":     "Use simple language and everyday analogies. Keep it short and encouraging.",
+        "INTERMEDIATE": "Use standard terminology and include one worked example.",
+        "ADVANCED":     "Use precise technical language, include edge cases and complexity analysis.",
+    }.get(difficulty.upper(), "Use standard terminology and include one worked example.")
+
+    if mode.upper() == "EXAM":
+        system_prompt = f"""You are a strict exam coach for "{title}".
+RULES (EXAM MODE):
+- NEVER give the full answer or solution.
+- Give ONLY a concise hint — a guiding question or a first step.
+- End with "Try it yourself first!" if appropriate.
+Keep your hint to 2-3 sentences maximum."""
+
+        user_prompt = f"""Context ({unit}s {start}-{end}):
+{context}
+
+Question: {question}
+
+Hint (2-3 sentences, no full answer):"""
+
+    else:  # LEARN mode
+        system_prompt = f"""You are an expert teacher for "{title}".
+For every answer use this EXACT structure:
+
+### Concept
+Explain the core idea clearly.
+
+### Formula / Rule
+State the formula or rule precisely (skip if not applicable).
+
+### Example
+Work through one step-by-step example.
+
+### Application
+Connect to a real exam problem or use-case.
+
+Depth guideline: {depth}
+Use ONLY the provided context. Start with "Great question!" when the question is interesting."""
+
+        user_prompt = f"""Context ({unit}s {start}-{end}):
+{context}
+
+Question: {question}
+
+Structured Answer:"""
+
+    return system_prompt, user_prompt
+
+
 def cmd_query(args: argparse.Namespace) -> None:
-    index     = load_index(args.course_id)
-    title     = index.get("title", args.course_id)
-    total     = index.get("total_pages", 0)
-    question  = args.question
+    index      = load_index(args.course_id)
+    title      = index.get("title", args.course_id)
+    total      = index.get("total_pages", 0)
+    question   = args.question
+    mode       = getattr(args, "mode",       "LEARN")
+    difficulty = getattr(args, "difficulty", "INTERMEDIATE")
 
     print(f"\n{'═'*60}")
-    print(f"  COURSE  : {title}  ({total} pages)")
-    print(f"  QUESTION: {question}")
+    print(f"  COURSE    : {title}  ({total} pages)")
+    print(f"  MODE      : {mode.upper()}  |  DIFFICULTY: {difficulty.upper()}")
+    print(f"  QUESTION  : {question}")
     print(f"{'═'*60}")
 
     t0 = time.time()
@@ -370,33 +527,28 @@ def cmd_query(args: argparse.Namespace) -> None:
     start, end, section_title = _select_section(index, question)
     print(f"\n  📖 Section: [{start}-{end}] {section_title}")
 
-    # 2. Build context
-    context = _get_context(index, start, end)
-    if not context.strip():                          # widen if empty
+    # 2. Build context (larger window matching backend)
+    context = _get_context(index, start, end, max_pages=5, max_chars=3000)
+    if not context.strip():
         context = _get_context(index, max(1, start - 5), min(total, end + 5))
 
-    # 3. Build prompt & stream answer
+    # 3. Build mode-aware prompt
     source_fmt = index.get("source_format", ".pdf")
-    unit = "page" if source_fmt == ".pdf" else "section"
+    system_prompt, user_prompt = _build_query_prompt(
+        context, question, title, start, end, source_fmt, mode, difficulty)
 
-    prompt = f"""You are a helpful course assistant for "{title}".
-Answer the question ONLY using the provided context. Be concise (4-6 sentences).
-
-Context ({unit}s {start}-{end}):
-{context}
-
-Question: {question}
-
-Answer:"""
-
+    # 4. Stream answer — use chat endpoint if available, else /api/generate
     print(f"\n{'─'*60}")
-    answer = call_ollama_stream(prompt, args.ollama_url, args.model, num_predict=350)
+    full_prompt = f"{system_prompt}\n\n{user_prompt}"
+    answer = call_ollama_stream(
+        full_prompt, args.ollama_url, args.model, num_predict=800)
     elapsed = time.time() - t0
 
-    print(f"{'─'*60}")
-    print(f"  Source: {unit}s {start}-{end}  |  '{title}'")
-    print(f"  Time  : {elapsed:.1f}s")
-    print(f"{'═'*60}")
+    print(f"\n{'─'*60}")
+    print(f"  📄 Source: {source_fmt[1:].upper() if source_fmt.startswith('.') else source_fmt}"
+          f"  pages {start}-{end}  ·  '{section_title}'")
+    print(f"  ⏱  Time  : {elapsed:.1f}s")
+    print(f"{'═'*60}\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -489,19 +641,26 @@ def main() -> None:
         epilog="""
 Examples
 --------
+  # Ingest a PDF (DB + Ollama default to 100.114.88.111)
   python3 course_manager.py add \\
-      --input textbooks/java.pdf --course-id java-basics \\
-      --ollama-url http://100.114.88.111:11434
+      --input "../.github/Doc/CSE PQB 1.pdf" \\
+      --course-id cse-pqb-1 --branch CSE --subject "Previous Question Bank"
 
-  python3 course_manager.py add \\
-      --input notes/python.md --course-id python-intro
-
+  # LEARN mode — structured answer (Concept / Formula / Example / Application)
   python3 course_manager.py query \\
-      --course-id java-basics --question "Explain switch statement"
+      --course-id cse-pqb-1 --question "Explain OS scheduling" \\
+      --mode LEARN --difficulty INTERMEDIATE
 
+  # EXAM mode — hint only, no full answer
+  python3 course_manager.py query \\
+      --course-id cse-pqb-1 --question "What is round-robin scheduling?" \\
+      --mode EXAM
+
+  # List all ingested courses
   python3 course_manager.py list
 
-  python3 course_manager.py remove --course-id java-basics
+  # Remove a course
+  python3 course_manager.py remove --course-id cse-pqb-1
 """,
     )
     sub = parser.add_subparsers(dest="command", required=True)
@@ -522,10 +681,16 @@ Examples
 
     # ── query ─────────────────────────────────────────────────────────────────
     p_qry = sub.add_parser("query", help="Ask a question about a course")
-    p_qry.add_argument("--course-id",  required=True)
-    p_qry.add_argument("--question",   required=True)
-    p_qry.add_argument("--ollama-url", default=DEFAULT_OLLAMA)
-    p_qry.add_argument("--model",      default=DEFAULT_MODEL)
+    p_qry.add_argument("--course-id",   required=True)
+    p_qry.add_argument("--question",    required=True)
+    p_qry.add_argument("--mode",        default="LEARN",
+                       choices=["LEARN", "EXAM"],
+                       help="LEARN = full structured answer (default) | EXAM = hint only")
+    p_qry.add_argument("--difficulty",  default="INTERMEDIATE",
+                       choices=["BEGINNER", "INTERMEDIATE", "ADVANCED"],
+                       help="Depth of the answer (default: INTERMEDIATE)")
+    p_qry.add_argument("--ollama-url",  default=DEFAULT_OLLAMA)
+    p_qry.add_argument("--model",       default=DEFAULT_MODEL)
 
     # ── list ──────────────────────────────────────────────────────────────────
     p_lst = sub.add_parser("list", help="List all ingested courses")

@@ -1,21 +1,18 @@
 // =============================================================================
-// Jenkinsfile.ingest — Course PDF / MD / TXT → PageIndex → PostgreSQL
+// Jenkinsfile.ingest — Course PDF / MD → chunks → nomic-embed-text → ChromaDB
 // =============================================================================
 //
-//  HOW FILE UPLOAD WORKS
-//  ─────────────────────
-//  1. Jenkins shows a "Build with Parameters" form.
-//  2. User picks COURSE_FILE (PDF/MD/TXT) from their computer and fills in
-//     COURSE_ID, ORIGINAL_FILENAME, and other options.
-//  3. Jenkins encodes the file as base64 and stores it in the build workspace.
-//  4. withFileParameter() decodes it back to a real file on disk.
-//  5. We rsync that file + the pageindex/ scripts to the remote server.
-//  6. On the server we run:
-//       build_index.py   → reads PDF/MD/TXT, calls Ollama, writes _index.json
-//       ingest_to_db.py  → reads _index.json, writes pages into PostgreSQL
+//  HOW IT WORKS
+//  ─────────────
+//  1. User uploads a PDF (or .md / .txt) via "Build with Parameters".
+//  2. Jenkins uploads the file + ingest_to_chroma.py to the Dell server.
+//  3. On the server:
+//       ingest_to_chroma.py  → extract text → chunk → embed (nomic-embed-text)
+//                             → store vectors in ChromaDB collection <COURSE_ID>
+//  4. Backend Java (VectorRagService) queries ChromaDB on every chat request.
 //
-//  PREREQUISITES (one-time setup)
-//  ───────────────────────────────
+//  PREREQUISITES (one-time setup on Dell)
+//  ───────────────────────────────────────
 //  Jenkins Plugins:
 //    ✅ File Parameter plugin  (for base64File upload)
 //    ✅ SSH Agent plugin       (for sshagent{} step)
@@ -23,107 +20,87 @@
 //  Jenkins Credentials:
 //    ID : server-ssh-key   (SSH Username with private key, user=dell)
 //
-//  Server must have:
-//    ✅ Python 3    (sudo apt install python3 python3-venv python3-pip)
-//    ✅ Docker (postgres already running via docker-compose.server.yml)
-//    ✅ pandoc      (sudo apt install pandoc)   ← needed by pypandoc
-//    ✅ pdfplumber  (installed via requirements.txt into venv)
+//  Dell server must have:
+//    ✅ Python 3   (sudo apt install python3 python3-venv python3-pip)
+//    ✅ ChromaDB container running  (docker compose up -d chromadb)
+//    ✅ Ollama container running with nomic-embed-text pulled
 // =============================================================================
 
 pipeline {
     agent any
 
-    // ── Parameters — shown as a form when clicking "Build with Parameters" ────
     parameters {
-
         // ── FILE UPLOAD ──────────────────────────────────────────────────────
-        // This is the actual file the user uploads from their browser.
-        // Requires the Jenkins "File Parameter" plugin.
         base64File(
             name: 'COURSE_FILE',
             description: '📄  Upload course file (PDF, Markdown .md, or plain text .txt)'
         )
-
-        // Original filename — browser upload loses the extension, so the user
-        // must tell us the real name (e.g. "java-textbook.pdf").
         string(
             name: 'ORIGINAL_FILENAME',
             defaultValue: 'course.pdf',
             description: '📝  Original filename with extension (e.g. java-textbook.pdf)'
         )
-
         // ── COURSE SETTINGS ──────────────────────────────────────────────────
         string(
             name: 'COURSE_ID',
             defaultValue: 'java-how-to-program',
-            description: '🆔  Unique course ID stored in DB (e.g. java-how-to-program)'
+            description: '🆔  Unique course ID — used as ChromaDB collection name AND in the chat API'
         )
-
         string(
-            name: 'SKIP_PAGES',
-            defaultValue: '0',
-            description: '⏩  Front-matter pages to skip (0 = auto-detect)'
+            name: 'CHUNK_SIZE',
+            defaultValue: '600',
+            description: '📏  Characters per chunk (600 = good balance of context vs precision)'
         )
-
+        string(
+            name: 'OVERLAP',
+            defaultValue: '100',
+            description: '🔁  Chunk overlap in characters (prevents cutting mid-sentence)'
+        )
         // ── SERVER SETTINGS ──────────────────────────────────────────────────
         string(
             name: 'SERVER_HOST',
             defaultValue: '100.114.88.111',
-            description: '🌐  Remote server IP'
+            description: '🌐  Dell server IP'
         )
-
         string(
             name: 'SERVER_DIR',
             defaultValue: '/home/dell/chatbot',
             description: '📁  Project directory on server'
         )
-
         string(
             name: 'OLLAMA_URL',
             defaultValue: 'http://localhost:11434',
-            description: '🤖  Ollama URL (localhost because scripts run ON the server)'
+            description: '🤖  Ollama URL on server (localhost because scripts run ON the server)'
         )
-
         string(
-            name: 'OLLAMA_MODEL',
-            defaultValue: 'qwen2.5:0.5b',
-            description: '🧠  Ollama model for TOC extraction'
+            name: 'CHROMA_URL',
+            defaultValue: 'http://localhost:8001',
+            description: '🗂️  ChromaDB URL on server'
+        )
+        string(
+            name: 'EMBED_MODEL',
+            defaultValue: 'nomic-embed-text',
+            description: '🧠  Ollama embedding model'
         )
     }
 
-    // ── Fixed environment ─────────────────────────────────────────────────────
     environment {
-        SERVER_USER   = 'dell'
-        SSH_CRED_ID   = 'server-ssh-key'
-        SSH_OPTS      = '-o StrictHostKeyChecking=no -o ConnectTimeout=30'
-
-        // DB on the server — scripts run ON server so we use the compose service name
-        // postgres is in the same docker network, but scripts run as host process
-        // so we use localhost (postgres port is mapped to host 5432)
-        DB_URL = 'postgresql://chatbot:chatbot_secret@localhost:5432/coursechatbot'
-
-        // Paths on the SERVER
+        SERVER_USER      = 'dell'
+        SSH_CRED_ID      = 'server-ssh-key'
+        SSH_OPTS         = '-o StrictHostKeyChecking=no -o ConnectTimeout=30'
         REMOTE_PAGEINDEX = "${params.SERVER_DIR}/pageindex"
         REMOTE_UPLOADS   = "${params.SERVER_DIR}/pageindex/uploads"
-        REMOTE_INDEX_OUT = "${params.SERVER_DIR}/pageindex/index_output"
         VENV_DIR         = "${params.SERVER_DIR}/pageindex/.venv"
     }
 
     stages {
 
-        // ── Stage 1: Save the uploaded file locally in Jenkins workspace ──────
-        //
-        //   base64File uploads the file encoded as base64.
-        //   withFileParameter() decodes it to a real temp file on disk.
-        //   We copy it into our workspace uploads/ folder with the correct name.
-        // ─────────────────────────────────────────────────────────────────────
+        // ── Stage 1: Save uploaded file in Jenkins workspace ──────────────────
         stage('💾 Save Uploaded File') {
             steps {
                 echo "📄 Saving uploaded file as: ${params.ORIGINAL_FILENAME}"
                 sh "mkdir -p ${WORKSPACE}/uploads"
-
                 withFileParameter('COURSE_FILE') {
-                    // COURSE_FILE env var = path to decoded temp file
                     sh """
                         cp "\${COURSE_FILE}" "${WORKSPACE}/uploads/${params.ORIGINAL_FILENAME}"
                         echo "Saved → ${WORKSPACE}/uploads/${params.ORIGINAL_FILENAME}"
@@ -133,23 +110,15 @@ pipeline {
             }
         }
 
-        // ── Stage 2: Sync pageindex scripts + uploaded file to server ─────────
-        //
-        //   rsync sends:
-        //     • pageindex/*.py          (the Python scripts)
-        //     • pageindex/requirements.txt
-        //     • uploads/<ORIGINAL_FILENAME>  (the course file)
-        //   to the remote server under SERVER_DIR/pageindex/
-        // ─────────────────────────────────────────────────────────────────────
+        // ── Stage 2: Sync scripts + uploaded file to Dell server ──────────────
         stage('📤 Sync to Server') {
             steps {
                 sshagent(credentials: [env.SSH_CRED_ID]) {
                     sh """
-                        # Ensure directories exist on server
                         ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
-                            "mkdir -p ${REMOTE_PAGEINDEX} ${REMOTE_UPLOADS} ${REMOTE_INDEX_OUT}"
+                            "mkdir -p ${REMOTE_PAGEINDEX} ${REMOTE_UPLOADS}"
 
-                        # Sync pageindex Python scripts
+                        # Sync Python scripts + requirements.txt
                         rsync -avz \\
                             --include='*.py' \\
                             --include='requirements.txt' \\
@@ -164,18 +133,13 @@ pipeline {
                             "${WORKSPACE}/uploads/${params.ORIGINAL_FILENAME}" \\
                             "${SERVER_USER}@${params.SERVER_HOST}:${REMOTE_UPLOADS}/${params.ORIGINAL_FILENAME}"
 
-                        echo "✅ Files synced to server."
+                        echo "✅ Files synced."
                     """
                 }
             }
         }
 
-        // ── Stage 3: Setup Python venv on server ──────────────────────────────
-        //
-        //   Creates a virtualenv under pageindex/.venv on the server.
-        //   Installs: pdfplumber, requests, psycopg2-binary, pypandoc
-        //   The venv is REUSED across builds (pip only installs if not cached).
-        // ─────────────────────────────────────────────────────────────────────
+        // ── Stage 3: Setup Python virtualenv on server ────────────────────────
         stage('🐍 Setup Python Env') {
             steps {
                 sshagent(credentials: [env.SSH_CRED_ID]) {
@@ -183,13 +147,10 @@ pipeline {
                         ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash << 'REMOTE'
                             set -e
                             cd ${REMOTE_PAGEINDEX}
-
-                            # Create venv only if it doesn't exist yet
                             if [ ! -d "${VENV_DIR}" ]; then
                                 echo "Creating virtual environment..."
                                 python3 -m venv "${VENV_DIR}"
                             fi
-
                             echo "Installing/updating packages..."
                             ${VENV_DIR}/bin/pip install --upgrade pip -q
                             ${VENV_DIR}/bin/pip install -r requirements.txt -q
@@ -200,59 +161,24 @@ REMOTE
             }
         }
 
-        // ── Stage 4: Build PageIndex ───────────────────────────────────────────
-        //
-        //   Runs build_index.py on the server.
-        //   What it does:
-        //     1. extract_text()     → reads PDF/MD/TXT, returns {page: text}
-        //     2. build_toc_prompt() → selects 10 best pages, builds LLM prompt
-        //     3. call_ollama()      → calls Ollama to generate TOC JSON
-        //     4. Saves _index.json  → {title, chapters, pages:{1:"...", 2:"..."}}
-        //
-        //   Input  : uploads/<ORIGINAL_FILENAME>
-        //   Output : index_output/<COURSE_ID>_index.json
-        // ─────────────────────────────────────────────────────────────────────
-        stage('🔍 Build Index') {
+        // ── Stage 4: Warm up nomic-embed-text model in Ollama ────────────────
+        stage('🔥 Warm Up Embed Model') {
             steps {
                 sshagent(credentials: [env.SSH_CRED_ID]) {
                     sh """
                         ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash << 'REMOTE'
                             set -e
-                            cd ${REMOTE_PAGEINDEX}
-
-                            echo ""
-                            echo "=== build_index.py ==="
-                            echo "Input  : ${REMOTE_UPLOADS}/${params.ORIGINAL_FILENAME}"
-                            echo "Output : ${REMOTE_INDEX_OUT}/${params.COURSE_ID}_index.json"
-                            echo "Ollama : ${params.OLLAMA_URL} | model: ${params.OLLAMA_MODEL}"
-                            echo ""
-
-                            ${VENV_DIR}/bin/python3 build_index.py \\
-                                --input      "${REMOTE_UPLOADS}/${params.ORIGINAL_FILENAME}" \\
-                                --output     "${REMOTE_INDEX_OUT}/${params.COURSE_ID}_index.json" \\
-                                --ollama-url "${params.OLLAMA_URL}" \\
-                                --model      "${params.OLLAMA_MODEL}" \\
-                                --skip-pages ${params.SKIP_PAGES}
-
-                            echo "✅ Index built."
+                            echo "Warming up ${params.EMBED_MODEL} ..."
+                            docker exec coursechatbot-ollama ollama pull ${params.EMBED_MODEL} 2>/dev/null || true
+                            echo "✅ Embed model ready."
 REMOTE
                     """
                 }
             }
         }
 
-        // ── Stage 5: Ingest into PostgreSQL ───────────────────────────────────
-        //
-        //   Runs ingest_to_db.py on the server.
-        //   What it does:
-        //     1. Reads _index.json
-        //     2. Upserts course_index row  (TOC metadata)
-        //     3. Upserts course_content rows (one per page, with full text)
-        //
-        //   After this step the backend API /api/courses/courseIds will list
-        //   the new COURSE_ID and questions can be asked about it.
-        // ─────────────────────────────────────────────────────────────────────
-        stage('🗄️ Ingest to DB') {
+        // ── Stage 5: Ingest → Chunk → Embed → ChromaDB ───────────────────────
+        stage('🗂️ Ingest to ChromaDB') {
             steps {
                 sshagent(credentials: [env.SSH_CRED_ID]) {
                     sh """
@@ -261,16 +187,23 @@ REMOTE
                             cd ${REMOTE_PAGEINDEX}
 
                             echo ""
-                            echo "=== ingest_to_db.py ==="
-                            echo "Index    : ${REMOTE_INDEX_OUT}/${params.COURSE_ID}_index.json"
-                            echo "Course ID: ${params.COURSE_ID}"
-                            echo "DB       : ${DB_URL}"
+                            echo "=== ingest_to_chroma.py ==="
+                            echo "Input      : ${REMOTE_UPLOADS}/${params.ORIGINAL_FILENAME}"
+                            echo "Course ID  : ${params.COURSE_ID}"
+                            echo "ChromaDB   : ${params.CHROMA_URL}"
+                            echo "Ollama     : ${params.OLLAMA_URL}"
+                            echo "Embed model: ${params.EMBED_MODEL}"
+                            echo "Chunk size : ${params.CHUNK_SIZE} / overlap: ${params.OVERLAP}"
                             echo ""
 
-                            ${VENV_DIR}/bin/python3 ingest_to_db.py \\
-                                --index     "${REMOTE_INDEX_OUT}/${params.COURSE_ID}_index.json" \\
-                                --course-id "${params.COURSE_ID}" \\
-                                --db-url    "${DB_URL}"
+                            ${VENV_DIR}/bin/python3 ingest_to_chroma.py \\
+                                --input       "${REMOTE_UPLOADS}/${params.ORIGINAL_FILENAME}" \\
+                                --course-id   "${params.COURSE_ID}" \\
+                                --chroma-url  "${params.CHROMA_URL}" \\
+                                --ollama-url  "${params.OLLAMA_URL}" \\
+                                --embed-model "${params.EMBED_MODEL}" \\
+                                --chunk-size  ${params.CHUNK_SIZE} \\
+                                --overlap     ${params.OVERLAP}
 
                             echo "✅ Ingest complete."
 REMOTE
@@ -279,49 +212,43 @@ REMOTE
             }
         }
 
-        // ── Stage 6: Copy index JSON back and archive ─────────────────────────
-        stage('📦 Archive') {
+        // ── Stage 6: Verify collection exists in ChromaDB ────────────────────
+        stage('✅ Verify') {
             steps {
                 sshagent(credentials: [env.SSH_CRED_ID]) {
                     sh """
-                        mkdir -p ${WORKSPACE}/index_output
-                        scp ${SSH_OPTS} \\
-                            "${SERVER_USER}@${params.SERVER_HOST}:${REMOTE_INDEX_OUT}/${params.COURSE_ID}_index.json" \\
-                            "${WORKSPACE}/index_output/${params.COURSE_ID}_index.json"
+                        ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} bash << 'REMOTE'
+                            set -e
+                            echo "Checking ChromaDB collection '${params.COURSE_ID}' ..."
+                            COUNT=\$(curl -sf ${params.CHROMA_URL}/api/v1/collections/${params.COURSE_ID}/count)
+                            echo "✅ Collection '${params.COURSE_ID}' has \${COUNT} vectors in ChromaDB"
+REMOTE
                     """
                 }
-                archiveArtifacts artifacts: 'index_output/**/*.json', fingerprint: true
-                echo "✅ Index JSON archived as Jenkins build artifact."
-            }
-        }
-
-        // ── Stage 7: Verify course appears in API ─────────────────────────────
-        stage('✅ Verify') {
-            steps {
                 sh """
-                    echo "Checking /api/courses/courseIds on server..."
-                    sleep 3
-                    curl -sf http://${params.SERVER_HOST}:8080/api/courses/courseIds \\
-                        | grep -q "${params.COURSE_ID}" \\
-                        && echo "✅ Course '${params.COURSE_ID}' visible in API" \\
-                        || echo "⚠️  Course not yet visible (backend may need restart)"
+                    echo "--- Backend chat test ---"
+                    curl -sf --max-time 20 \\
+                        -X POST http://${params.SERVER_HOST}:8000/api/chat \\
+                        -H 'Content-Type: application/json' \\
+                        -d '{"courseId":"${params.COURSE_ID}","question":"What is this course about?","mode":"LEARN"}' \\
+                        && echo "\\n✅ Chat API responding OK" \\
+                        || echo "⚠️  Chat API not responding yet (check backend logs)"
                 """
             }
         }
     }
 
-    // ── Post ──────────────────────────────────────────────────────────────────
     post {
         success {
             echo """
             ============================================================
             ✅  INGEST SUCCESSFUL
 
-            Course ID : ${params.COURSE_ID}
-            File      : ${params.ORIGINAL_FILENAME}
-            Server    : ${params.SERVER_HOST}
-            Index JSON: ${REMOTE_INDEX_OUT}/${params.COURSE_ID}_index.json
-            DB        : coursechatbot @ ${params.SERVER_HOST}:5432
+            Course ID  : ${params.COURSE_ID}
+            File       : ${params.ORIGINAL_FILENAME}
+            Server     : ${params.SERVER_HOST}
+            ChromaDB   : ${params.CHROMA_URL}
+            Embed model: ${params.EMBED_MODEL}
 
             ➡️  Ask questions at: http://${params.SERVER_HOST}:3000
             ============================================================
@@ -332,12 +259,13 @@ REMOTE
             sshagent(credentials: [env.SSH_CRED_ID]) {
                 sh """
                     ssh ${SSH_OPTS} ${SERVER_USER}@${params.SERVER_HOST} \\
-                        'docker logs coursechatbot-postgres --tail 20 2>/dev/null || true' || true
+                        'docker logs coursechatbot-chromadb --tail 30 2>/dev/null || true
+                         docker logs coursechatbot-ollama   --tail 20 2>/dev/null || true' || true
                 """
             }
         }
         always {
-            echo "Build #${env.BUILD_NUMBER} finished — ${currentBuild.currentResult}"
+            echo "Build #${env.BUILD_NUMBER} — ${currentBuild.currentResult}"
         }
     }
 }

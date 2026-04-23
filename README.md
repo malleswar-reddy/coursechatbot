@@ -251,3 +251,28 @@ cd frontend
 npm install
 npm run dev
 ```
+
+
+ssh dell@100.114.88.111
+cd /home/dell/chatbot
+# Run the updated deploy script (it will update Ollama + pull gemma4)
+bash /path/to/deploy-server.sh
+
+# Or manually:
+docker pull ollama/ollama:latest
+docker stop coursechatbot-ollama && docker rm coursechatbot-ollama
+docker compose up -d ollama
+docker exec coursechatbot-ollama ollama pull gemma4:latest   # ~9.6GB download
+
+
+docker exec -it coursechatbot-ollama ollama run gemma4
+
+
+
+# From inside the Dell container
+docker exec -it coursechatbot-ollama ollama run gemma4 "describe this image" --image /path/to/image.jpg
+
+docker volume ls size --format "{{.Name}}: {{.Size}}" | grep coursechatbot_ollama_data
+
+
+docker ps -a --format "table {{.Names}}\t{{.Status}}\t{{.Size}}" | grep coursechatbot-ollama
