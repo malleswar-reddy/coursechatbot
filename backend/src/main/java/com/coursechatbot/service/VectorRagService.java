@@ -95,36 +95,28 @@ public class VectorRagService {
                 .doOnError(e -> log.error("Embedding failed: {}", e.getMessage()));
     }
 
+    // ── ChromaDB v2 base path ─────────────────────────────────────────────────
+    private static final String CHROMA_V2 =
+            "/api/v2/tenants/default_tenant/databases/default_database";
+
     // ── Step 3: Query ChromaDB ────────────────────────────────────────────────
 
     @SuppressWarnings("unchecked")
     private Mono<String> queryChroma(String courseId, List<Double> embedding) {
-        // 3a. Get collection UUID by name
-        return chromaClient.get()
-                .uri("/api/v1/collections/{name}", courseId)
+        // ChromaDB v2: query directly by collection name — no UUID lookup needed
+        return chromaClient.post()
+                .uri(CHROMA_V2 + "/collections/{name}/query", courseId)
+                .bodyValue(Map.of(
+                        "query_embeddings", List.of(embedding),
+                        "n_results", topK,
+                        "include", List.of("documents", "metadatas")
+                ))
                 .retrieve()
                 .bodyToMono(Map.class)
-                .flatMap(col -> {
-                    String colId = (String) col.get("id");
-                    if (colId == null) {
-                        log.warn("Collection '{}' not found in ChromaDB", courseId);
-                        return Mono.just("");
-                    }
-                    // 3b. Query for top-K similar chunks
-                    return chromaClient.post()
-                            .uri("/api/v1/collections/{id}/query", colId)
-                            .bodyValue(Map.of(
-                                    "query_embeddings", List.of(embedding),
-                                    "n_results",        topK,
-                                    "include",          List.of("documents", "metadatas")
-                            ))
-                            .retrieve()
-                            .bodyToMono(Map.class)
-                            .map(resp -> {
-                                List<List<String>> docs = (List<List<String>>) resp.get("documents");
-                                if (docs == null || docs.isEmpty() || docs.get(0).isEmpty()) return "";
-                                return String.join("\n\n---\n\n", docs.get(0));
-                            });
+                .map(resp -> {
+                    List<List<String>> docs = (List<List<String>>) resp.get("documents");
+                    if (docs == null || docs.isEmpty() || docs.get(0).isEmpty()) return "";
+                    return String.join("\n\n---\n\n", docs.get(0));
                 })
                 .onErrorResume(e -> {
                     log.error("ChromaDB query failed for course '{}': {}", courseId, e.getMessage());

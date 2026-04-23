@@ -64,9 +64,9 @@ services:
       - ANONYMIZED_TELEMETRY=FALSE
     restart: unless-stopped
     healthcheck:
-      # ChromaDB image has Python but NOT curl — use Python for health check
+      # ChromaDB v2 API — /api/v1 is deprecated
       test: ["CMD", "python3", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat').read()"]
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v2/heartbeat').read()" ]
       interval: 15s
       timeout: 5s
       retries: 5

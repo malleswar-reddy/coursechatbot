@@ -23,17 +23,19 @@ Options:
 import argparse
 import hashlib
 import json
+import requests
 import sys
 import time
 from pathlib import Path
-
-import requests
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 EMBED_MODEL  = "nomic-embed-text"
 CHUNK_SIZE   = 600
 CHUNK_OVERLAP = 100
 BATCH_SIZE   = 50   # chunks per ChromaDB /add request
+
+# ── ChromaDB v2 API base path ─────────────────────────────────────────────────
+CHROMA_V2 = "/api/v2/tenants/default_tenant/databases/default_database"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -134,7 +136,7 @@ def warmup_embed_model(ollama_url: str, model: str) -> None:
 
 def delete_collection(course_id: str, chroma_url: str) -> None:
     base = chroma_url.rstrip("/")
-    r = requests.delete(f"{base}/api/v1/collections/{course_id}", timeout=10)
+    r = requests.delete(f"{base}{CHROMA_V2}/collections/{course_id}", timeout=10)
     if r.status_code in (200, 404):
         print(f"  Deleted existing collection '{course_id}' (or it didn't exist).")
     else:
@@ -144,17 +146,19 @@ def delete_collection(course_id: str, chroma_url: str) -> None:
 def create_collection(course_id: str, chroma_url: str) -> str:
     base = chroma_url.rstrip("/")
     r = requests.post(
-        f"{base}/api/v1/collections",
+        f"{base}{CHROMA_V2}/collections",
         json={"name": course_id, "metadata": {"hnsw:space": "cosine"}},
         timeout=10
     )
     r.raise_for_status()
-    col_id = r.json()["id"]
+    # v2 returns the collection object; id may be under "id" or "name"
+    data = r.json()
+    col_id = data.get("id") or data.get("name") or course_id
     print(f"  Created collection '{course_id}' → ID: {col_id}")
-    return col_id
+    return course_id  # v2: use name directly for subsequent calls
 
 
-def add_batch_to_chroma(col_id: str, batch_chunks: list[dict],
+def add_batch_to_chroma(col_name: str, batch_chunks: list[dict],
                          batch_embeddings: list[list[float]], chroma_url: str) -> None:
     base = chroma_url.rstrip("/")
     payload = {
@@ -163,13 +167,13 @@ def add_batch_to_chroma(col_id: str, batch_chunks: list[dict],
         "documents":  [c["text"] for c in batch_chunks],
         "metadatas":  [{"page": c["page"]} for c in batch_chunks],
     }
-    r = requests.post(f"{base}/api/v1/collections/{col_id}/add", json=payload, timeout=120)
+    r = requests.post(f"{base}{CHROMA_V2}/collections/{col_name}/add", json=payload, timeout=120)
     r.raise_for_status()
 
 
 def verify_collection(course_id: str, chroma_url: str) -> int:
     base = chroma_url.rstrip("/")
-    r = requests.get(f"{base}/api/v1/collections/{course_id}/count", timeout=10)
+    r = requests.get(f"{base}{CHROMA_V2}/collections/{course_id}/count", timeout=10)
     r.raise_for_status()
     return r.json()
 
