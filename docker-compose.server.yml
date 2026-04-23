@@ -57,13 +57,20 @@ services:
     ports:
       - "8001:8000"
     volumes:
-      - chroma_data:/chroma/chroma
+      - chroma_data:/data          # ChromaDB saves to /data inside container
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/data
+      - ANONYMIZED_TELEMETRY=FALSE
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      # ChromaDB image has Python but NOT curl — use Python for health check
+      test: ["CMD", "python3", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/heartbeat').read()"]
       interval: 15s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
 volumes:
   ollama_data:
