@@ -108,26 +108,39 @@ pipeline {
             }
         }
 
-        // ── Stage 2: Sync files (REMOTE mode only) ────────────────────────────
-        // LOCAL mode: Jenkins workspace already has the code — skip rsync entirely
-        // REMOTE mode: rsync workspace to server
+        // ── Stage 2: Sync files ───────────────────────────────────────────────
+        // LOCAL mode: rsync workspace → SERVER_DIR so manual commands work there too
+        // REMOTE mode: rsync workspace → remote server via SSH
         stage('Sync to Server') {
-            when {
-                expression { params.DEPLOY_MODE == 'remote' }
-            }
             steps {
-                sshagent(credentials: [env.SSH_CRED_ID]) {
-                    sh """
-                        echo "📤 Syncing files to ${SERVER_USER}@${params.SERVER_HOST}:${params.SERVER_DIR} ..."
-                        rsync -avz --delete \\
-                            --exclude='.git' --exclude='target' \\
-                            --exclude='node_modules' --exclude='.next' \\
-                            --exclude='*.log' --exclude='uploads' --exclude='index_output' \\
-                            -e "ssh ${SSH_OPTS}" \\
-                            "\${WORKSPACE}/" \\
-                            "${SERVER_USER}@${params.SERVER_HOST}:${params.SERVER_DIR}/"
-                        echo "✅ Sync complete."
-                    """
+                script {
+                    if (params.DEPLOY_MODE == 'local') {
+                        sh """
+                            echo "📂 Syncing workspace → ${params.SERVER_DIR} ..."
+                            mkdir -p ${params.SERVER_DIR}
+                            rsync -a --delete \\
+                                --exclude='.git' --exclude='target' \\
+                                --exclude='node_modules' --exclude='.next' \\
+                                --exclude='*.log' --exclude='uploads' --exclude='index_output' \\
+                                "${env.WORKSPACE}/" \\
+                                "${params.SERVER_DIR}/"
+                            echo "✅ Synced to ${params.SERVER_DIR}"
+                        """
+                    } else {
+                        sshagent(credentials: [env.SSH_CRED_ID]) {
+                            sh """
+                                echo "📤 Syncing files to ${SERVER_USER}@${params.SERVER_HOST}:${params.SERVER_DIR} ..."
+                                rsync -avz --delete \\
+                                    --exclude='.git' --exclude='target' \\
+                                    --exclude='node_modules' --exclude='.next' \\
+                                    --exclude='*.log' --exclude='uploads' --exclude='index_output' \\
+                                    -e "ssh ${SSH_OPTS}" \\
+                                    "\${WORKSPACE}/" \\
+                                    "${SERVER_USER}@${params.SERVER_HOST}:${params.SERVER_DIR}/"
+                                echo "✅ Sync complete."
+                            """
+                        }
+                    }
                 }
             }
         }
