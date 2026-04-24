@@ -64,9 +64,7 @@ services:
       - ANONYMIZED_TELEMETRY=FALSE
     restart: unless-stopped
     healthcheck:
-      # ChromaDB v2 API — /api/v1 is deprecated
-      test: ["CMD", "python3", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v2/heartbeat').read()" ]
+      test: [ "CMD", "python3", "-c", "import urllib.request; exit(0) if urllib.request.urlopen('http://localhost:8000/api/v2/heartbeat').getcode() == 200 else exit(1)" ]
       interval: 15s
       timeout: 5s
       retries: 5

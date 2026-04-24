@@ -41,16 +41,16 @@ public class CourseController {
      * Returns all course IDs (ChromaDB collection names).
      */
     @GetMapping("/courseIds")
-    @SuppressWarnings("unchecked")
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public Mono<List<String>> getAllCourseIds() {
         return webClientBuilder.clone().baseUrl(chromaBaseUrl).build()
                 .get()
                 .uri(CHROMA_V2 + "/collections")
                 .retrieve()
                 .bodyToMono(List.class)
-                .map(cols -> cols.stream()
+                .map(cols -> (List<String>) ((java.util.List<?>) cols).stream()
                         .map(c -> (String) ((Map<?, ?>) c).get("name"))
-                        .toList())
+                        .collect(java.util.stream.Collectors.toList()))
                 .onErrorReturn(List.of());
     }
 
