@@ -64,11 +64,11 @@ services:
       - ANONYMIZED_TELEMETRY=FALSE
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "python3", "-c", "import urllib.request; exit(0) if urllib.request.urlopen('http://localhost:8000/api/v2/heartbeat').getcode() == 200 else exit(1)" ]
+      test: [ "CMD-SHELL", "curl -sf http://localhost:8000/api/v2/heartbeat || exit 1" ]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 15s
 
 volumes:
   ollama_data:

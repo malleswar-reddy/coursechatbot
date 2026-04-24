@@ -39,13 +39,21 @@ container_healthy() {
 # ── Step 1: ChromaDB ─────────────────────────────────────────────────────────
 echo "[1/4] 🗂️  ChromaDB..."
 
-if container_running "coursechatbot-chromadb"; then
-    echo "  ℹ️  ChromaDB already running — skipping."
+if container_running "coursechatbot-chromadb" && container_healthy "coursechatbot-chromadb"; then
+    echo "  ℹ️  ChromaDB already running and healthy — skipping."
 else
-    echo "  Starting ChromaDB..."
+    echo "  Starting/restarting ChromaDB..."
     docker compose -f "$COMPOSE_FILE" up -d chromadb
+    # Wait up to 30s for ChromaDB to become healthy
+    for i in $(seq 1 6); do
+        sleep 5
+        if curl -sf http://localhost:8001/api/v2/heartbeat > /dev/null 2>&1; then
+            echo "  ✅ ChromaDB is up."
+            break
+        fi
+        echo "  ⏳ Waiting for ChromaDB... ($((i*5))s)"
+    done
 fi
-echo "  ✅ ChromaDB is up."
 
 # ── Step 2: Ollama ────────────────────────────────────────────────────────────
 echo ""
@@ -105,6 +113,14 @@ else
     echo "  ⏩ Skipped (BUILD_FRONTEND=false)."
 fi
 
+# ── Clean up orphaned Postgres (no longer used — ChromaDB replaced it) ───────
+if container_running "coursechatbot-postgres"; then
+    echo "  🧹 Stopping orphaned coursechatbot-postgres (no longer needed)..."
+    docker stop coursechatbot-postgres 2>/dev/null || true
+    docker rm   coursechatbot-postgres 2>/dev/null || true
+    echo "  ✅ Postgres removed."
+fi
+
 # ── Deploy backend + frontend ─────────────────────────────────────────────────
 echo ""
 echo "🚀  Deploying backend + frontend..."
@@ -151,7 +167,7 @@ curl -sf http://localhost:8000/actuator/health \
 
 echo ""
 echo "  🔍 ChromaDB health:"
-curl -sf http://localhost:8001/api/v1/heartbeat \
+curl -sf http://localhost:8001/api/v2/heartbeat \
     && echo "  ✅ ChromaDB → OK" \
     || echo "  ⚠️  ChromaDB not responding yet"
 

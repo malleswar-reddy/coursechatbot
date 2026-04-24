@@ -298,14 +298,26 @@ REMOTE
         stage('Smoke Test') {
             steps {
                 sh """
-                    echo "🧪 Smoke testing via tunnel ..."
-                    sleep 10
+                    echo "🧪 Smoke testing ..."
+                    sleep 30
+
+                    echo "--- Backend (direct) ---"
+                    curl -sf --max-time 20 \\
+                        http://${params.SERVER_HOST}:8000/api/courses/courseIds \\
+                        && echo "✅ Backend direct OK" \\
+                        || echo "⚠️  Backend direct not responding yet (check logs)"
 
                     echo "--- Backend API (tunnel) ---"
-                    curl -sf --max-time 15 \\
+                    curl -sf --max-time 20 \\
                         ${params.NEXT_PUBLIC_API_URL}/api/courses/courseIds \\
-                        && echo "✅ Backend OK" \\
-                        || echo "⚠️  Backend not responding yet (check logs)"
+                        && echo "✅ Backend tunnel OK" \\
+                        || echo "⚠️  Backend tunnel not responding yet (Cloudflare may need more time)"
+
+                    echo "--- ChromaDB health (direct) ---"
+                    curl -sf --max-time 10 \\
+                        http://${params.SERVER_HOST}:8001/api/v2/heartbeat \\
+                        && echo "✅ ChromaDB OK" \\
+                        || echo "⚠️  ChromaDB not responding (check container logs)"
 
                     echo "--- Frontend (direct) ---"
                     curl -sf --max-time 15 \\

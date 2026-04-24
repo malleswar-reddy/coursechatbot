@@ -6,6 +6,7 @@ import dev.langchain4j.model.ollama.OllamaChatModel;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.Duration;
 
@@ -43,5 +44,14 @@ public class OllamaConfig {
     @Bean
     public ObjectMapper objectMapper() {
         return new ObjectMapper();
+    }
+
+    /**
+     * Explicit WebClient.Builder bean — required by VectorRagService and CourseController.
+     * Spring Boot 4 / Spring Framework 7 with lazy-initialization does not auto-expose this.
+     */
+    @Bean
+    public WebClient.Builder webClientBuilder() {
+        return WebClient.builder();
     }
 }
