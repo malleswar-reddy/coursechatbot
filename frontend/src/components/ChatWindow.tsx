@@ -147,10 +147,11 @@ export default function ChatWindow() {
 
         for (const line of lines) {
           if (!line.startsWith('data:')) continue
-          // SSE format is "data: <token>" — slice exactly 6 chars to preserve leading spaces
-          // DO NOT trimStart() — Ollama sends tokens like " word" (space is the word separator)
-          const raw   = line.startsWith('data: ') ? line.slice(6) : line.slice(5)
-          const token = raw
+          // Spring SSE format: "data:" + raw_token (NO extra space added by Spring).
+          // A token like " question" (with leading space) arrives as "data: question".
+          // ALWAYS slice(5) to remove "data:" and preserve the leading space.
+          // slice(6) would strip that space → words run together.
+          const token = line.slice(5).replace(/\{NL\}/g, '\n')   // decode encoded newlines
 
           if (token === '[DONE]') {
             setStreamPhase('idle')

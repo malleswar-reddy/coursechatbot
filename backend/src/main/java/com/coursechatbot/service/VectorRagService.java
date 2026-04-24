@@ -286,6 +286,9 @@ public class VectorRagService {
                     }
                 })
                 .filter(token -> !token.isEmpty())
+                // Encode \n as {NL} so SSE newlines (event delimiters) aren't confused
+                // with content newlines. Frontend decodes {NL} back to \n.
+                .map(token -> token.replace("\n", "{NL}"))
                 .concatWith(Flux.just("[DONE]"))   // sentinel for frontend
                 .doOnError(e -> log.error("Ollama stream error: {}", e.getMessage()))
                 .onErrorResume(e -> Flux.just("⚠️ LLM stream error: " + e.getMessage(), "[DONE]"));
