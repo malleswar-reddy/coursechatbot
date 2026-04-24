@@ -8,8 +8,11 @@ import com.coursechatbot.service.SessionService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.Map;
@@ -38,6 +41,22 @@ public class ChatController {
         log.info("Chat request: courseId={}, mode={}, difficulty={}, question={}",
                 request.getCourseId(), request.getMode(), request.getDifficultyLevel(), request.getQuestion());
         return vectorRagService.answer(request).map(ResponseEntity::ok);
+    }
+
+    /**
+     * Streaming endpoint — returns tokens via Server-Sent Events as the LLM generates them.
+     * Frontend reads with fetch() + ReadableStream.
+     * Each event: "data: <token>\n\n"
+     * Final event: "data: [DONE]\n\n"
+     */
+    @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> chatStream(@Valid @RequestBody ChatRequest request) {
+        log.info("Stream request: courseId={}, mode={}, difficulty={}",
+                request.getCourseId(), request.getMode(), request.getDifficultyLevel());
+        return vectorRagService.answerStream(request)
+                .map(token -> ServerSentEvent.<String>builder()
+                        .data(token)
+                        .build());
     }
 
     /**

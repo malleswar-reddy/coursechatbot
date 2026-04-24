@@ -2,6 +2,7 @@ package com.coursechatbot.service;
 
 import com.coursechatbot.dto.ChatRequest;
 import com.coursechatbot.dto.ChatResponse;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
@@ -11,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -25,7 +27,8 @@ import java.util.UUID;
  *   1. Academic integrity check (instant).
  *   2. Embed question via Ollama nomic-embed-text.
  *   3. Query ChromaDB collection (per courseId) for top-K chunks.
- *   4. Build context → single LLM call (gemma3:4b).
+ *   4a. answer()       — full blocking LLM call (ChatModel / LangChain4j).
+ *   4b. answerStream() — streaming tokens direct from Ollama /api/generate.
  *   5. Record session interaction (async, best-effort).
  */
 @Service
@@ -37,9 +40,13 @@ public class VectorRagService {
     private final PromptBuilderService    promptBuilderService;
     private final SessionService          sessionService;
     private final WebClient.Builder       webClientBuilder;
+    private final ObjectMapper            objectMapper;
 
     @Value("${ollama.base-url:http://localhost:11434}")
     private String ollamaBaseUrl;
+
+    @Value("${ollama.model:gemma3:4b}")
+    private String ollamaModel;
 
     @Value("${ollama.embedding-model:nomic-embed-text}")
     private String embeddingModel;
@@ -55,15 +62,19 @@ public class VectorRagService {
 
     @PostConstruct
     void init() {
-        ollamaClient = webClientBuilder.clone().baseUrl(ollamaBaseUrl).build();
+        ollamaClient = webClientBuilder.clone()
+                .baseUrl(ollamaBaseUrl)
+                .codecs(c -> c.defaultCodecs().maxInMemorySize(4 * 1024 * 1024))
+                .build();
         chromaClient = webClientBuilder.clone().baseUrl(chromaBaseUrl).build();
-        log.info("VectorRagService initialized — Ollama: {} | ChromaDB: {} | EmbedModel: {} | TopK: {}",
-                ollamaBaseUrl, chromaBaseUrl, embeddingModel, topK);
+        log.info("VectorRagService initialized — Ollama: {} | Model: {} | ChromaDB: {} | EmbedModel: {} | TopK: {}",
+                ollamaBaseUrl, ollamaModel, chromaBaseUrl, embeddingModel, topK);
     }
 
-    // ── Public API ────────────────────────────────────────────────────────────
+    // ── Public API: blocking (full response) ─────────────────────────────────
 
     public Mono<ChatResponse> answer(ChatRequest request) {
+        long t0 = System.currentTimeMillis();
         String courseId   = request.getCourseId();
         String question   = request.getQuestion();
         String mode       = request.getMode() != null ? request.getMode().toUpperCase() : "LEARN";
@@ -76,10 +87,68 @@ public class VectorRagService {
             return buildRefusalResponse(courseId, mode, difficulty, sessionId, question, refusal);
         }
 
-        // Step 2 → 3 → 4: Embed → Retrieve → Generate
+        log.info("⏱ [{}] Step 2: Embedding question ({} chars)...", courseId, question.length());
         return embedQuestion(question)
-                .flatMap(embedding -> queryChroma(courseId, embedding))
-                .flatMap(context -> generateAnswer(request, courseId, question, mode, difficulty, sessionId, context));
+                .doOnNext(v -> log.info("⏱ [{}] Embed done: {}ms", courseId, System.currentTimeMillis() - t0))
+                .flatMap(embedding -> {
+                    long t1 = System.currentTimeMillis();
+                    log.info("⏱ [{}] Step 3: Querying ChromaDB...", courseId);
+                    return queryChroma(courseId, embedding)
+                            .doOnNext(ctx -> log.info("⏱ [{}] ChromaDB done: {}ms | context: {} chars",
+                                    courseId, System.currentTimeMillis() - t1, ctx.length()));
+                })
+                .flatMap(context -> {
+                    long t2 = System.currentTimeMillis();
+                    log.info("⏱ [{}] Step 4: LLM call (blocking)...", courseId);
+                    return generateAnswer(request, courseId, question, mode, difficulty, sessionId, context)
+                            .doOnNext(r -> log.info("⏱ [{}] LLM done: {}ms | total: {}ms",
+                                    courseId, System.currentTimeMillis() - t2, System.currentTimeMillis() - t0));
+                });
+    }
+
+    // ── Public API: streaming (token by token) ────────────────────────────────
+
+    /**
+     * Stream answer tokens directly from Ollama /api/generate.
+     * Emits individual text tokens as they arrive, then "[DONE]" as final marker.
+     */
+    public Flux<String> answerStream(ChatRequest request) {
+        long t0 = System.currentTimeMillis();
+        String courseId   = request.getCourseId();
+        String question   = request.getQuestion();
+        String mode       = request.getMode() != null ? request.getMode().toUpperCase() : "LEARN";
+        String difficulty = request.getDifficultyLevel() != null ? request.getDifficultyLevel().toUpperCase() : "INTERMEDIATE";
+
+        // Integrity check
+        String refusal = promptBuilderService.checkIntegrityViolation(question);
+        if (refusal != null) {
+            return Flux.just(refusal, "[DONE]");
+        }
+
+        log.info("⏱ [{}] STREAM Step 2: Embedding...", courseId);
+        return embedQuestion(question)
+                .doOnNext(v -> log.info("⏱ [{}] STREAM Embed done: {}ms", courseId, System.currentTimeMillis() - t0))
+                .flatMapMany(embedding -> {
+                    long t1 = System.currentTimeMillis();
+                    log.info("⏱ [{}] STREAM Step 3: ChromaDB...", courseId);
+                    return queryChroma(courseId, embedding)
+                            .doOnNext(ctx -> log.info("⏱ [{}] STREAM ChromaDB done: {}ms | ctx: {} chars",
+                                    courseId, System.currentTimeMillis() - t1, ctx.length()))
+                            .flatMapMany(context -> {
+                                if (context.isBlank()) {
+                                    String msg = "⚠️ No relevant content found for course '" + courseId +
+                                                 "'. Please ensure the course PDF has been ingested into ChromaDB.";
+                                    return Flux.just(msg, "[DONE]");
+                                }
+                                String systemPrompt = promptBuilderService.buildSystemPrompt(mode, null, difficulty);
+                                String userPrompt   = buildPrompt(context, question);
+                                log.info("⏱ [{}] STREAM Step 4: Ollama streaming...", courseId);
+                                long t2 = System.currentTimeMillis();
+                                return streamFromOllama(systemPrompt, userPrompt)
+                                        .doOnComplete(() -> log.info("⏱ [{}] STREAM LLM done: {}ms | total: {}ms",
+                                                courseId, System.currentTimeMillis() - t2, System.currentTimeMillis() - t0));
+                            });
+                });
     }
 
     // ── Step 2: Embed question via Ollama ─────────────────────────────────────
@@ -99,10 +168,6 @@ public class VectorRagService {
     private static final String CHROMA_V2 =
             "/api/v2/tenants/default_tenant/databases/default_database";
 
-    /**
-     * Resolve collection name → UUID.
-     * ChromaDB v2 data-plane endpoints (/add, /query, /count) require the UUID, not the name.
-     */
     @SuppressWarnings({"unchecked", "rawtypes"})
     private Mono<String> resolveCollectionUuid(String courseId) {
         return chromaClient.get()
@@ -118,7 +183,6 @@ public class VectorRagService {
 
     @SuppressWarnings("unchecked")
     private Mono<String> queryChroma(String courseId, List<Double> embedding) {
-        // ChromaDB v2: /query requires UUID — resolve name → UUID first
         return resolveCollectionUuid(courseId)
                 .flatMap(uuid -> chromaClient.post()
                         .uri(CHROMA_V2 + "/collections/{uuid}/query", uuid)
@@ -145,7 +209,7 @@ public class VectorRagService {
                 }));
     }
 
-    // ── Step 4: Generate answer with LLM ─────────────────────────────────────
+    // ── Step 4a: Generate answer (blocking) ───────────────────────────────────
 
     private Mono<ChatResponse> generateAnswer(ChatRequest request, String courseId,
                                                String question, String mode, String difficulty,
@@ -159,8 +223,6 @@ public class VectorRagService {
         boolean isExam      = "EXAM".equals(mode);
         String systemPrompt = promptBuilderService.buildSystemPrompt(mode, null, difficulty);
         String userPrompt   = buildPrompt(context, question);
-
-        log.debug("LLM call: mode={} difficulty={} contextLen={} chars", mode, difficulty, context.length());
 
         return Mono.fromCallable(() ->
                 chatModel.chat(
@@ -188,6 +250,45 @@ public class VectorRagService {
             }
             return Mono.just(resp);
         });
+    }
+
+    // ── Step 4b: Stream tokens from Ollama /api/generate ─────────────────────
+
+    /**
+     * Calls Ollama /api/generate with stream=true and returns individual tokens.
+     * Ollama returns NDJSON: one JSON object per line, each with a "response" field.
+     * Ends with "[DONE]" sentinel so the frontend knows the stream is complete.
+     */
+    private Flux<String> streamFromOllama(String systemPrompt, String userPrompt) {
+        Map<String, Object> payload = Map.of(
+                "model",   ollamaModel,
+                "system",  systemPrompt,
+                "prompt",  userPrompt,
+                "stream",  true,
+                "options", Map.of("temperature", 0.7, "num_predict", 1024)
+        );
+
+        return ollamaClient.post()
+                .uri("/api/generate")
+                .bodyValue(payload)
+                .retrieve()
+                .bodyToFlux(String.class)        // StringDecoder splits on \n → one JSON per emission
+                .filter(line -> !line.isBlank())
+                .mapNotNull(line -> {
+                    try {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> json = objectMapper.readValue(line, Map.class);
+                        Object token = json.get("response");
+                        return (token != null) ? token.toString() : null;
+                    } catch (Exception e) {
+                        log.debug("Skipping non-JSON line: {}", line);
+                        return null;
+                    }
+                })
+                .filter(token -> !token.isEmpty())
+                .concatWith(Flux.just("[DONE]"))   // sentinel for frontend
+                .doOnError(e -> log.error("Ollama stream error: {}", e.getMessage()))
+                .onErrorResume(e -> Flux.just("⚠️ LLM stream error: " + e.getMessage(), "[DONE]"));
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

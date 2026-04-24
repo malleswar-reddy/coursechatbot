@@ -14,6 +14,7 @@ type Difficulty = 'BEGINNER' | 'INTERMEDIATE' | 'ADVANCED'
 interface Message {
   role: 'user' | 'assistant'
   text: string
+  streaming?: boolean
   meta?: { startPage?: number; endPage?: number; reason?: string }
   isHintOnly?: boolean
   followUpSuggestions?: string[]
@@ -42,6 +43,17 @@ interface PerformanceSummaryData {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8080'
 
+// ── Timing helper shown in "Thinking…" label ──────────────────────────────────
+function useElapsedSeconds(active: boolean) {
+  const [secs, setSecs] = useState(0)
+  useEffect(() => {
+    if (!active) { setSecs(0); return }
+    const id = setInterval(() => setSecs(s => s + 1), 1000)
+    return () => clearInterval(id)
+  }, [active])
+  return secs
+}
+
 export default function ChatWindow() {
   const [courses,      setCourses]    = useState<CourseItem[]>([])
   const [courseId,     setCourseId]   = useState('')
@@ -54,7 +66,9 @@ export default function ChatWindow() {
   const [error,        setError]      = useState('')
   const [showPomodoro, setShowPomodoro] = useState(false)
   const [summary,      setSummary]    = useState<PerformanceSummaryData | null>(null)
+  const [streamPhase,  setStreamPhase] = useState<'idle'|'embed'|'search'|'llm'>('idle')
   const bottomRef = useRef<HTMLDivElement>(null)
+  const elapsed = useElapsedSeconds(loading)
 
   // Fetch all courses (with branch metadata) on mount
   useEffect(() => {
@@ -95,25 +109,110 @@ export default function ChatWindow() {
     setError('')
     setMessages(prev => [...prev, { role: 'user', text: question }])
     setLoading(true)
+    setStreamPhase('embed')
 
     try {
       const sid = await ensureSession()
 
-      const res = await fetch(`${API_URL}/api/chat`, {
+      // ── Streaming via /api/chat/stream ────────────────────────────────────
+      const res = await fetch(`${API_URL}/api/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ courseId, question, mode, difficultyLevel: difficulty, sessionId: sid }),
       })
 
+      if (!res.ok || !res.body) {
+        // Fallback to non-streaming if stream endpoint fails
+        return sendMessageFallback(question, sid)
+      }
+
+      // Add an empty streaming message placeholder
+      setMessages(prev => [...prev, { role: 'assistant', text: '', streaming: true }])
+
+      const reader  = res.body.getReader()
+      const decoder = new TextDecoder()
+      let   buffer  = ''
+      let   fullText = ''
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+
+        // SSE format: "data: <token>\n\n"
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''   // keep incomplete last line in buffer
+
+        for (const line of lines) {
+          if (!line.startsWith('data:')) continue
+          const token = line.slice(5).trimStart()  // "data: " → token
+
+          if (token === '[DONE]') {
+            setStreamPhase('idle')
+            // Finalise: remove streaming flag
+            setMessages(prev => {
+              const copy = [...prev]
+              const last = copy[copy.length - 1]
+              if (last?.role === 'assistant') {
+                copy[copy.length - 1] = { ...last, streaming: false,
+                  followUpSuggestions: ['Show another example', "What's the formula?", 'What are common errors?'] }
+              }
+              return copy
+            })
+            break
+          }
+
+          // Update phase label based on timing context (embed → search → llm)
+          if (fullText === '') setStreamPhase('llm')
+
+          fullText += token
+          // Append token to last assistant message
+          setMessages(prev => {
+            const copy = [...prev]
+            const last = copy[copy.length - 1]
+            if (last?.role === 'assistant') {
+              copy[copy.length - 1] = { ...last, text: fullText, streaming: true }
+            }
+            return copy
+          })
+        }
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Unknown error'
+      setError(msg)
+      setMessages(prev => {
+        // Replace streaming placeholder with error if present
+        const copy = [...prev]
+        const last = copy[copy.length - 1]
+        if (last?.role === 'assistant' && last.streaming) {
+          copy[copy.length - 1] = { role: 'assistant', text: `⚠️ Error: ${msg}` }
+        } else {
+          copy.push({ role: 'assistant', text: `⚠️ Error: ${msg}` })
+        }
+        return copy
+      })
+    } finally {
+      setLoading(false)
+      setStreamPhase('idle')
+    }
+  }
+
+  // Non-streaming fallback (used if /stream endpoint is unavailable)
+  async function sendMessageFallback(question: string, sid: string | null) {
+    try {
+      const res = await fetch(`${API_URL}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ courseId, question, mode, difficultyLevel: difficulty, sessionId: sid }),
+      })
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }))
         throw new Error(err.error ?? 'Request failed')
       }
-
       const data: ChatApiResponse = await res.json()
-
       if (data.pomodoroReminder) setShowPomodoro(true)
-
       setMessages(prev => [...prev, {
         role: 'assistant',
         text: data.answer,
@@ -127,6 +226,7 @@ export default function ChatWindow() {
       setMessages(prev => [...prev, { role: 'assistant', text: `⚠️ Error: ${msg}` }])
     } finally {
       setLoading(false)
+      setStreamPhase('idle')
     }
   }
 
@@ -143,7 +243,15 @@ export default function ChatWindow() {
 
   function handleModeChange(newMode: Mode) {
     setMode(newMode)
-    setSessionId(null) // new session on mode switch
+    setSessionId(null)
+  }
+
+  // Phase label shown while loading
+  const phaseLabel: Record<typeof streamPhase, string> = {
+    idle:   'Thinking…',
+    embed:  '🔍 Embedding question…',
+    search: '📚 Searching context…',
+    llm:    '✍️ Generating answer…',
   }
 
   return (
@@ -198,7 +306,12 @@ export default function ChatWindow() {
         {messages.map((msg, idx) => (
           <MessageBubble key={idx} message={msg} onChipClick={text => sendMessage(text)} />
         ))}
-        {loading && <div style={styles.botBubble}><em>Thinking…</em></div>}
+        {loading && (
+          <div style={styles.botBubble}>
+            <span style={{ marginRight: 8 }}>{phaseLabel[streamPhase]}</span>
+            <span style={styles.timer}>{elapsed}s</span>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
@@ -246,7 +359,8 @@ const styles: Record<string, React.CSSProperties> = {
   dismissBtn: { marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: '#92400e' },
   messages:   { flex: 1, padding: '16px', overflowY: 'auto', minHeight: 400, maxHeight: 540, display: 'flex', flexDirection: 'column', gap: 12 },
   placeholder:{ color: '#aaa', textAlign: 'center', marginTop: 60 },
-  botBubble:  { alignSelf: 'flex-start', background: '#f0f0f0', color: '#1a1a2e', borderRadius: '16px 16px 16px 4px', padding: '10px 14px', maxWidth: '80%' },
+  botBubble:  { alignSelf: 'flex-start', background: '#f0f0f0', color: '#1a1a2e', borderRadius: '16px 16px 16px 4px', padding: '10px 14px', maxWidth: '80%', display: 'flex', alignItems: 'center', gap: 6 },
+  timer:      { fontSize: 11, color: '#888', fontVariantNumeric: 'tabular-nums' },
   inputRow:   { display: 'flex', borderTop: '1px solid #eee', padding: '12px 16px', gap: 8 },
   textInput:  { flex: 1, padding: '10px 14px', borderRadius: 8, border: '1px solid #ddd', fontSize: 15, outline: 'none' },
   sendBtn:    { padding: '10px 20px', background: '#1a1a2e', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: 15, fontWeight: 600 },
