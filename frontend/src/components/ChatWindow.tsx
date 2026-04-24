@@ -147,7 +147,10 @@ export default function ChatWindow() {
 
         for (const line of lines) {
           if (!line.startsWith('data:')) continue
-          const token = line.slice(5).trimStart()  // "data: " → token
+          // SSE format is "data: <token>" — slice exactly 6 chars to preserve leading spaces
+          // DO NOT trimStart() — Ollama sends tokens like " word" (space is the word separator)
+          const raw   = line.startsWith('data: ') ? line.slice(6) : line.slice(5)
+          const token = raw
 
           if (token === '[DONE]') {
             setStreamPhase('idle')
