@@ -5,16 +5,16 @@ services:
     container_name: coursechatbot-backend
     ports:
       - "8000:8080"   # host:8000 → container:8080 (Spring Boot default)
-    extra_hosts:
-      - "host.docker.internal:host-gateway"   # Linux: resolves to host IP → reaches Ollama + ChromaDB on host
     environment:
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma3:4b}
       - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL:-nomic-embed-text}
-      - CHROMA_BASE_URL=${CHROMA_BASE_URL:-http://host.docker.internal:8001}
+      - CHROMA_BASE_URL=${CHROMA_BASE_URL:-http://chromadb:8000}
     depends_on:
       ollama:
         condition: service_started
+      chromadb:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:

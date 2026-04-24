@@ -99,29 +99,50 @@ public class VectorRagService {
     private static final String CHROMA_V2 =
             "/api/v2/tenants/default_tenant/databases/default_database";
 
+    /**
+     * Resolve collection name → UUID.
+     * ChromaDB v2 data-plane endpoints (/add, /query, /count) require the UUID, not the name.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private Mono<String> resolveCollectionUuid(String courseId) {
+        return chromaClient.get()
+                .uri(CHROMA_V2 + "/collections/{name}", courseId)
+                .retrieve()
+                .bodyToMono(Map.class)
+                .map(resp -> (String) resp.get("id"))
+                .doOnError(e -> log.error("UUID lookup failed for '{}': {}", courseId, e.getMessage()))
+                .onErrorResume(e -> Mono.empty());
+    }
+
     // ── Step 3: Query ChromaDB ────────────────────────────────────────────────
 
     @SuppressWarnings("unchecked")
     private Mono<String> queryChroma(String courseId, List<Double> embedding) {
-        // ChromaDB v2: query directly by collection name — no UUID lookup needed
-        return chromaClient.post()
-                .uri(CHROMA_V2 + "/collections/{name}/query", courseId)
-                .bodyValue(Map.of(
-                        "query_embeddings", List.of(embedding),
-                        "n_results", topK,
-                        "include", List.of("documents", "metadatas")
-                ))
-                .retrieve()
-                .bodyToMono(Map.class)
-                .map(resp -> {
-                    List<List<String>> docs = (List<List<String>>) resp.get("documents");
-                    if (docs == null || docs.isEmpty() || docs.get(0).isEmpty()) return "";
-                    return String.join("\n\n---\n\n", docs.get(0));
-                })
-                .onErrorResume(e -> {
-                    log.error("ChromaDB query failed for course '{}': {}", courseId, e.getMessage());
-                    return Mono.just("");
-                });
+        // ChromaDB v2: /query requires UUID — resolve name → UUID first
+        return resolveCollectionUuid(courseId)
+                .flatMap(uuid -> chromaClient.post()
+                        .uri(CHROMA_V2 + "/collections/{uuid}/query", uuid)
+                        .bodyValue(Map.of(
+                                "query_embeddings", List.of(embedding),
+                                "n_results", topK,
+                                "include", List.of("documents", "metadatas")
+                        ))
+                        .retrieve()
+                        .bodyToMono(Map.class)
+                        .map(resp -> {
+                            List<List<String>> docs = (List<List<String>>) resp.get("documents");
+                            if (docs == null || docs.isEmpty() || docs.get(0).isEmpty()) return "";
+                            return String.join("\n\n---\n\n", docs.get(0));
+                        })
+                        .onErrorResume(e -> {
+                            log.error("ChromaDB query failed for course '{}': {}", courseId, e.getMessage());
+                            return Mono.just("");
+                        })
+                )
+                .switchIfEmpty(Mono.fromSupplier(() -> {
+                    log.warn("Collection '{}' not found in ChromaDB — no UUID resolved", courseId);
+                    return "";
+                }));
     }
 
     // ── Step 4: Generate answer with LLM ─────────────────────────────────────

@@ -43,28 +43,57 @@ public class CourseController {
     @GetMapping("/courseIds")
     @SuppressWarnings({"unchecked", "rawtypes"})
     public Mono<List<String>> getAllCourseIds() {
+        return getCollections()
+                .map(cols -> cols.stream()
+                        .map(c -> (String) c.get("name"))
+                        .collect(java.util.stream.Collectors.toList()))
+                .onErrorReturn(List.of());
+    }
+
+    /**
+     * Returns courses with full metadata (branch, subject, title) from ChromaDB collection metadata.
+     */
+    @GetMapping
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public Mono<List<Map<String, Object>>> getAllCourses() {
+        return getCollections()
+                .map(cols -> cols.stream()
+                        .map(col -> {
+                            String name    = col.get("name") instanceof String s ? s : "";
+                            Object metaObj = col.get("metadata");
+                            String branch  = "General";
+                            String subject = name;
+                            String title   = name;
+                            if (metaObj instanceof Map<?, ?> m) {
+                                Object b = m.get("branch");
+                                Object s = m.get("subject");
+                                Object t = m.get("title");
+                                if (b instanceof String v) branch  = v;
+                                if (s instanceof String v) subject = v;
+                                if (t instanceof String v) title   = v;
+                            }
+                            return Map.<String, Object>of(
+                                    "courseId", name,
+                                    "branch",   branch,
+                                    "subject",  subject,
+                                    "title",    title);
+                        })
+                        .collect(java.util.stream.Collectors.toList()))
+                .onErrorReturn(List.of());
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private Mono<List<Map<String, Object>>> getCollections() {
         return webClientBuilder.clone().baseUrl(chromaBaseUrl).build()
                 .get()
                 .uri(CHROMA_V2 + "/collections")
                 .retrieve()
                 .bodyToMono(List.class)
-                .map(cols -> (List<String>) ((java.util.List<?>) cols).stream()
-                        .map(c -> (String) ((Map<?, ?>) c).get("name"))
-                        .collect(java.util.stream.Collectors.toList()))
+                .map(cols -> (List<Map<String, Object>>) cols)
+                .doOnError(e -> log.warn("ChromaDB /collections error: {}", e.getMessage()))
                 .onErrorReturn(List.of());
     }
 
-    /** Returns courses with metadata for UI. */
-    @GetMapping
-    public Mono<List<Map<String, Object>>> getAllCourses() {
-        return getAllCourseIds()
-                .map(ids -> ids.stream()
-                        .map(id -> Map.<String, Object>of(
-                                "courseId", id,
-                                "branch", "General",
-                                "subject", id))
-                        .toList());
-    }
 
     /**
      * Ingest via script — this endpoint returns guidance.

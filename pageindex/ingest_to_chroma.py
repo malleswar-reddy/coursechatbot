@@ -143,22 +143,37 @@ def delete_collection(course_id: str, chroma_url: str) -> None:
         print(f"  ⚠️  Delete returned {r.status_code}: {r.text}", file=sys.stderr)
 
 
-def create_collection(course_id: str, chroma_url: str) -> str:
+def create_collection(course_id: str, chroma_url: str,
+                       branch: str | None = None, subject: str | None = None,
+                       title: str | None = None) -> str:
+    """Create collection and return its UUID (required for /add, /query, /count in v2)."""
     base = chroma_url.rstrip("/")
+    metadata: dict = {"hnsw:space": "cosine"}
+    if branch:  metadata["branch"]  = branch
+    if subject: metadata["subject"] = subject
+    if title:   metadata["title"]   = title
     r = requests.post(
         f"{base}{CHROMA_V2}/collections",
-        json={"name": course_id, "metadata": {"hnsw:space": "cosine"}},
+        json={"name": course_id, "metadata": metadata},
         timeout=10
     )
     r.raise_for_status()
-    # v2 returns the collection object; id may be under "id" or "name"
     data = r.json()
-    col_id = data.get("id") or data.get("name") or course_id
-    print(f"  Created collection '{course_id}' → ID: {col_id}")
-    return course_id  # v2: use name directly for subsequent calls
+    # ChromaDB v2: /add, /query, /count require UUID — not name
+    col_uuid = data.get("id") or course_id
+    print(f"  Created collection '{course_id}' → UUID: {col_uuid}")
+    return col_uuid
 
 
-def add_batch_to_chroma(col_name: str, batch_chunks: list[dict],
+def get_collection_uuid(course_id: str, chroma_url: str) -> str:
+    """Resolve collection name → UUID. Required for v2 data-plane endpoints."""
+    base = chroma_url.rstrip("/")
+    r = requests.get(f"{base}{CHROMA_V2}/collections/{course_id}", timeout=10)
+    r.raise_for_status()
+    return r.json()["id"]
+
+
+def add_batch_to_chroma(col_uuid: str, batch_chunks: list[dict],
                          batch_embeddings: list[list[float]], chroma_url: str) -> None:
     base = chroma_url.rstrip("/")
     payload = {
@@ -167,13 +182,16 @@ def add_batch_to_chroma(col_name: str, batch_chunks: list[dict],
         "documents":  [c["text"] for c in batch_chunks],
         "metadatas":  [{"page": c["page"]} for c in batch_chunks],
     }
-    r = requests.post(f"{base}{CHROMA_V2}/collections/{col_name}/add", json=payload, timeout=120)
+    # v2: use UUID in path
+    r = requests.post(f"{base}{CHROMA_V2}/collections/{col_uuid}/add", json=payload, timeout=120)
     r.raise_for_status()
 
 
 def verify_collection(course_id: str, chroma_url: str) -> int:
     base = chroma_url.rstrip("/")
-    r = requests.get(f"{base}{CHROMA_V2}/collections/{course_id}/count", timeout=10)
+    # Resolve name → UUID first
+    col_uuid = get_collection_uuid(course_id, chroma_url)
+    r = requests.get(f"{base}{CHROMA_V2}/collections/{col_uuid}/count", timeout=10)
     r.raise_for_status()
     return r.json()
 
@@ -191,6 +209,9 @@ def main() -> None:
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
     parser.add_argument("--overlap",    type=int, default=CHUNK_OVERLAP)
     parser.add_argument("--embed-model", default=EMBED_MODEL)
+    parser.add_argument("--branch",     default=None, help="Engineering branch (e.g. CSE|ECE|CIVIL)")
+    parser.add_argument("--subject",    default=None, help="Subject name (e.g. 'Previous Question Bank')")
+    parser.add_argument("--title",      default=None, help="Human-readable course title")
     args = parser.parse_args()
 
     t0 = time.time()
@@ -236,12 +257,13 @@ def main() -> None:
     # Step 4: Store in ChromaDB
     print(f"\n[4/4] Storing in ChromaDB ...")
     delete_collection(args.course_id, args.chroma_url)
-    col_id = create_collection(args.course_id, args.chroma_url)
+    col_uuid = create_collection(args.course_id, args.chroma_url,
+                                  branch=args.branch, subject=args.subject, title=args.title)
 
     for i in range(0, len(chunks), BATCH_SIZE):
         batch_c = chunks[i:i + BATCH_SIZE]
         batch_e = embeddings[i:i + BATCH_SIZE]
-        add_batch_to_chroma(col_id, batch_c, batch_e, args.chroma_url)
+        add_batch_to_chroma(col_uuid, batch_c, batch_e, args.chroma_url)
         print(f"  Stored batch {i // BATCH_SIZE + 1}/{(len(chunks) + BATCH_SIZE - 1) // BATCH_SIZE} "
               f"({len(batch_c)} chunks)")
 
