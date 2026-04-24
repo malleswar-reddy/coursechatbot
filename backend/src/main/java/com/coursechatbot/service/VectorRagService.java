@@ -135,7 +135,8 @@ public class VectorRagService {
                             .doOnNext(ctx -> log.info("⏱ [{}] STREAM ChromaDB done: {}ms | ctx: {} chars",
                                     courseId, System.currentTimeMillis() - t1, ctx.length()))
                             .flatMapMany(context -> {
-                                if (context.isBlank()) {
+                                if (context.isBlank() || context.length() < 50) {
+                                    log.warn("⚠️ [{}] Context too short ({} chars) — PDF may not be ingested", courseId, context.length());
                                     String msg = "⚠️ No relevant content found for course '" + courseId +
                                                  "'. Please ensure the course PDF has been ingested into ChromaDB.";
                                     return Flux.just(msg, "[DONE]");
@@ -265,7 +266,7 @@ public class VectorRagService {
                 "system",  systemPrompt,
                 "prompt",  userPrompt,
                 "stream",  true,
-                "options", Map.of("temperature", 0.7, "num_predict", 1024)
+                "options", Map.of("temperature", 0.7, "num_predict", 512)
         );
 
         return ollamaClient.post()
