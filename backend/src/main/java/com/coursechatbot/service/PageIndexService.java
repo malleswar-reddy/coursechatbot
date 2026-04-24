@@ -3,7 +3,6 @@ package com.coursechatbot.service;
 import com.coursechatbot.dto.ChatRequest;
 import com.coursechatbot.dto.ChatResponse;
 import com.coursechatbot.model.CourseContent;
-import com.coursechatbot.model.CourseIndex;
 import com.coursechatbot.repository.CourseContentRepository;
 import com.coursechatbot.repository.CourseIndexRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -13,7 +12,6 @@ import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -22,17 +20,21 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Core PageIndex RAG service — fully reactive with WebFlux + R2DBC.
+ * PageIndex RAG service (legacy — not used by ChatController).
+ *
+ * ChromaDB vector search is now the primary RAG path via VectorRagService.
+ * This class is retained for unit-test coverage only; it is NOT a Spring bean
+ * (@Service removed) so the Spring context does not try to autowire the
+ * plain repository interfaces at startup.
  *
  * Flow:
  *   1. Academic integrity check (instant, no LLM call if violated).
- *   2. Load the course index from PostgreSQL (reactive).
+ *   2. Load the course index (reactive — requires injected CourseIndexRepository mock).
  *   3. Keyword-score chapters/sections to pick the best page range.
- *   4. Fetch up to 5 pages of context from PostgreSQL (reactive).
+ *   4. Fetch up to 5 pages of context (reactive — requires CourseContentRepository mock).
  *   5. Single LLM call offloaded to boundedElastic scheduler (blocking I/O).
  *   6. Record interaction in session (async, best-effort).
  */
-@Service
 @Slf4j
 @RequiredArgsConstructor
 public class PageIndexService {
